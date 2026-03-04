@@ -2634,11 +2634,35 @@ export function App() {
   if (checkingPairing) return html`<div style="display:flex;align-items:center;justify-content:center;height:100vh;background:var(--bg);color:var(--text2)">⏳ Loading...</div>`;
   if (!paired) return html`<${PairingGate} onSuccess=${() => setPaired(true)} />`;
 
-  // Render current page — extracted to a proper component for reliable re-rendering.
-  // Preact+HTM has a subtle issue where inline renderPage() calls inside template
-  // literals may not properly trigger re-renders when the switch value changes.
-  // By using a dedicated component with key=${page}, Preact reliably destroys the
-  // old component tree and mounts the new one on each navigation.
+  // Inline page render function — bypasses component boundary diffing issues.
+  // PageRouter as a separate component with key prop was failing to re-render
+  // even when key changed. Inlining eliminates component boundary altogether.
+  const renderPage = () => {
+    switch (currentPage) {
+      case 'dashboard': return html`<${DashboardPage} config=${config} lang=${lang} />`;
+      case 'chat': return html`<${ChatPage} config=${config} lang=${lang} />`;
+      case 'hands': return html`<${HandsPage} lang=${lang} />`;
+      case 'settings': return html`<${SettingsPage} config=${config} lang=${lang} />`;
+      case 'providers': return html`<${ProvidersPage} config=${config} lang=${lang} />`;
+      case 'channels': return html`<${ChannelsPage} lang=${lang} />`;
+      case 'tools': return html`<${ToolsPage} lang=${lang} />`;
+      case 'agents': return html`<${AgentsPage} config=${config} lang=${lang} />`;
+      case 'knowledge': return html`<${KnowledgePage} lang=${lang} />`;
+      case 'mcp': return html`<${McpPage} lang=${lang} />`;
+      case 'orchestration': return html`<${OrchestrationPage} lang=${lang} />`;
+      case 'gallery': return html`<${GalleryPage} lang=${lang} />`;
+      case 'brain': return html`<${SettingsPage} config=${config} lang=${lang} />`;
+      case 'configfile': return html`<${ConfigFilePage} lang=${lang} />`;
+      case 'scheduler': return html`<${SchedulerPage} lang=${lang} />`;
+      case 'traces': return html`<${TracesPage} lang=${lang} />`;
+      case 'cost': return html`<${CostPage} lang=${lang} />`;
+      case 'activity': return html`<${ActivityPage} lang=${lang} />`;
+      case 'workflows': return html`<${WorkflowsPage} lang=${lang} />`;
+      case 'skills': return html`<${SkillsPage} lang=${lang} />`;
+      case 'wiki': return html`<${WikiPage} lang=${lang} />`;
+      default: return html`<div class="card" style="padding:40px;text-align:center"><div style="font-size:48px;margin-bottom:16px">📄</div><h2>${currentPage}</h2></div>`;
+    }
+  };
 
   return html`
     <${AppContext.Provider} value=${{ config, lang, t: (k) => t(k, lang), showToast, navigate, wsStatus }}>
@@ -2651,8 +2675,8 @@ export function App() {
           wsStatus=${wsStatus}
           agentName=${config?.agent_name || 'BizClaw Agent'}
         />
-        <main class="main">
-          <${PageRouter} key=${currentPage} page=${currentPage} config=${config} lang=${lang} />
+        <main class="main" key=${currentPage}>
+          ${renderPage()}
         </main>
       </div>
       <${Toast} ...${toast || {}} />
