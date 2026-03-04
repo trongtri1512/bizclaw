@@ -178,6 +178,7 @@ tr:hover td{background:rgba(255,255,255,.02)}
       <a href="/gallery" onclick="navigateTo(event,'gallery')" id="nav-gallery">📦 <span data-i18n="nav.gallery">Gallery</span></a>
       <a href="/knowledge" onclick="navigateTo(event,'knowledge')" id="nav-knowledge">📚 <span data-i18n="nav.knowledge">Kho tri thức</span></a>
       <a href="/scheduler" onclick="navigateTo(event,'scheduler')" id="nav-scheduler">⏰ <span data-i18n="nav.scheduler">Lịch trình</span></a>
+      <a href="/workflows" onclick="navigateTo(event,'workflows')" id="nav-workflows">🔀 <span>Workflow Rules</span></a>
       <div class="nav-sep"></div>
       <a href="/brain" onclick="navigateTo(event,'brain')" id="nav-brain">🧠 <span data-i18n="nav.brain">Brain Engine</span></a>
       <a href="/configfile" onclick="navigateTo(event,'configfile')" id="nav-configfile">📄 <span data-i18n="nav.config">Tệp cấu hình</span></a>
@@ -928,6 +929,72 @@ tr:hover td{background:rgba(255,255,255,.02)}
       </div>
     </div>
 
+    <!-- ═══ WORKFLOW RULES ═══ -->
+    <div id="page-workflows" style="display:none">
+      <div class="page-header">
+        <div><h1>🔀 Workflow Rules</h1><div class="sub">Tự động hóa dựa trên sự kiện — khi nhận tin nhắn, metric vượt ngưỡng hoặc lịch trình kích hoạt</div></div>
+        <button class="btn btn-primary" onclick="toggleWorkflowForm()">+ Thêm Rule</button>
+      </div>
+      <div class="stats">
+        <div class="card"><div class="card-label">Tổng Rules</div><div class="card-value accent" id="wf-total">0</div></div>
+        <div class="card"><div class="card-label">Đang hoạt động</div><div class="card-value green" id="wf-active">0</div></div>
+        <div class="card"><div class="card-label">Đã kích hoạt</div><div class="card-value blue" id="wf-triggered">0</div></div>
+      </div>
+      <!-- Add Rule Form -->
+      <div id="workflow-add-form" class="card" style="display:none;margin-bottom:20px">
+        <h3 style="margin-bottom:12px">➕ Tạo Workflow Rule mới</h3>
+        <div class="ch-fields">
+          <label>Tên Rule</label>
+          <input type="text" id="wf-name" placeholder="urgent-alert">
+          <label>🎯 Trigger (Khi nào kích hoạt)</label>
+          <select id="wf-trigger-type" onchange="wfTriggerChanged()" style="width:100%;padding:8px;border-radius:6px;border:1px solid var(--border);background:var(--card);color:var(--text)">
+            <option value="message_keyword">💬 Tin nhắn chứa từ khóa</option>
+            <option value="any_message">📨 Mọi tin nhắn</option>
+            <option value="threshold">📊 Metric vượt ngưỡng</option>
+            <option value="schedule">📅 Lịch trình kích hoạt</option>
+            <option value="startup">🚀 Khởi động hệ thống</option>
+            <option value="channel_event">📱 Sự kiện kênh (member mới)</option>
+          </select>
+          <div id="wf-trigger-config-wrap">
+            <label>Từ khóa (phân cách dấu phẩy)</label>
+            <input type="text" id="wf-trigger-keywords" placeholder="urgent, gấp, khẩn cấp">
+          </div>
+          <label>⚡ Action (Làm gì)</label>
+          <select id="wf-action-type" onchange="wfActionChanged()" style="width:100%;padding:8px;border-radius:6px;border:1px solid var(--border);background:var(--card);color:var(--text)">
+            <option value="agent_prompt">🤖 Gửi prompt cho Agent</option>
+            <option value="notify">📢 Thông báo</option>
+            <option value="send_message">💬 Gửi tin nhắn</option>
+            <option value="webhook">🔗 Gọi Webhook</option>
+          </select>
+          <div id="wf-action-config-wrap">
+            <label>Prompt / Nội dung</label>
+            <textarea id="wf-action-content" placeholder="Phân tích tin nhắn từ {{event.sender}}: {{event.text}}" rows="3"></textarea>
+          </div>
+          <label>🔢 Priority (1-99, thấp = ưu tiên cao)</label>
+          <input type="number" id="wf-priority" value="10" min="1" max="99">
+          <label>⏱️ Cooldown (giây giữa mỗi lần kích hoạt)</label>
+          <input type="number" id="wf-cooldown" value="60" min="0">
+        </div>
+        <div style="background:var(--bg);padding:10px;border-radius:8px;margin-top:10px">
+          <div style="font-size:11px;color:var(--text2)">💡 <strong>Template variables:</strong> <code>{{event.text}}</code> <code>{{event.sender}}</code> <code>{{event.channel}}</code> <code>{{event.chat_id}}</code> <code>{{event.timestamp}}</code> <code>{{event.metric}}</code> <code>{{event.value}}</code></div>
+        </div>
+        <div class="ch-actions" style="margin-top:12px">
+          <button class="btn btn-primary btn-sm" onclick="addWorkflowRule()">✅ Tạo Rule</button>
+          <button class="btn btn-outline btn-sm" onclick="toggleWorkflowForm()">Hủy</button>
+        </div>
+      </div>
+      <!-- Rules List -->
+      <div class="card">
+        <h3 style="margin-bottom:12px">📋 Danh sách Rules</h3>
+        <div id="workflow-rules-list"><div style="color:var(--text2);text-align:center;padding:20px">Đang tải...</div></div>
+      </div>
+      <!-- Workflow Templates -->
+      <div class="card" style="margin-top:20px">
+        <h3 style="margin-bottom:12px">📦 Workflow Templates</h3>
+        <div id="workflow-templates-list"><div style="color:var(--text2);text-align:center;padding:20px">Đang tải...</div></div>
+      </div>
+    </div>
+
     <!-- ═══ CONFIG FILE ═══ -->
     <div id="page-configfile" style="display:none">
       <div class="page-header"><div><h1>📄 config.toml</h1><div class="sub" id="config-path">—</div></div></div>
@@ -1051,6 +1118,7 @@ function showPage(name, pushState) {
   if (name === 'knowledge') loadKnowledgeDocs();
   if (name === 'brain') loadBrainFiles();
   if (name === 'scheduler') loadSchedulerPage();
+  if (name === 'workflows') loadWorkflowRulesPage();
   if (name === 'orchestration') loadOrchestrationPage();
   if (name === 'wiki') loadTenantWiki('getting-started');
   if (name === 'groups') { navigateTo(null, 'chat'); return; } // redirect groups to chat
@@ -1066,7 +1134,7 @@ window.addEventListener('popstate', (ev) => {
 function getPageFromPath() {
   const path = location.pathname.replace(/^\//, '').replace(/\/$/, '');
   // Map valid page names
-  const validPages = ['dashboard','chat','settings','providers','channels','tools','brain','configfile','mcp','agents','orchestration','gallery','knowledge','scheduler','wiki'];
+  const validPages = ['dashboard','chat','settings','providers','channels','tools','brain','configfile','mcp','agents','orchestration','gallery','knowledge','scheduler','workflows','wiki'];
   if (path === 'groups') return 'chat'; // redirect groups page to chat
   if (!path || path === '' || !validPages.includes(path)) return 'dashboard';
   return path;
@@ -2135,6 +2203,165 @@ async function deleteSchedulerTask(id) {
     } else {
       toast('❌ Không tìm thấy tác vụ');
     }
+  } catch(e) { toast('❌ ' + e.message); }
+}
+
+// ═══ WORKFLOW RULES PAGE ═══
+async function loadWorkflowRulesPage() {
+  // Load rules
+  try {
+    const res = await authFetch(API + '/api/v1/workflow-rules');
+    const data = await res.json();
+    const rules = data.rules || [];
+    document.getElementById('wf-total').textContent = rules.length;
+    document.getElementById('wf-active').textContent = rules.filter(r => r.enabled).length;
+    document.getElementById('wf-triggered').textContent = rules.reduce((sum, r) => sum + (r.run_count || 0), 0);
+
+    if (rules.length === 0) {
+      document.getElementById('workflow-rules-list').innerHTML = '<div style="color:var(--text2);text-align:center;padding:30px">🔀 Chưa có rule nào. Bấm "+ Thêm Rule" để tạo tự động hóa.</div>';
+    } else {
+      const triggerLabel = (t) => ({
+        'message_keyword': '💬 Từ khóa', 'any_message': '📨 Mọi tin', 'threshold': '📊 Ngưỡng',
+        'schedule': '📅 Lịch trình', 'startup': '🚀 Khởi động', 'channel_event': '📱 Sự kiện kênh',
+      }[t] || t);
+      const actionLabel = (a) => ({
+        'agent_prompt': '🤖 Agent', 'notify': '📢 Thông báo',
+        'send_message': '💬 Gửi tin', 'webhook': '🔗 Webhook',
+      }[a] || a);
+
+      document.getElementById('workflow-rules-list').innerHTML = rules.map(r => `
+        <div class="ch-card" style="margin-bottom:12px">
+          <div class="ch-header">
+            <span class="ch-name">${escapeHtml(r.name)}</span>
+            <div style="display:flex;align-items:center;gap:8px">
+              <span class="badge badge-${r.enabled ? 'green' : 'orange'}">${r.enabled ? '● Active' : 'Paused'}</span>
+            </div>
+          </div>
+          <div class="ch-fields" style="font-size:12px;display:grid;gap:4px">
+            <div>🎯 <strong>Trigger:</strong> ${triggerLabel(r.trigger_type)}</div>
+            <div>⚡ <strong>Action:</strong> ${actionLabel(r.action_type)}</div>
+            <div>🔢 <strong>Priority:</strong> ${r.priority} | ⏱️ <strong>Cooldown:</strong> ${r.cooldown_secs}s</div>
+            <div>🔄 <strong>Đã chạy:</strong> ${r.run_count || 0} lần${r.last_triggered ? ' | 🕐 Lần cuối: ' + new Date(r.last_triggered).toLocaleString() : ''}</div>
+            ${r.trigger_config && r.trigger_config.keywords ? `<div>🔑 <strong>Keywords:</strong> ${JSON.stringify(r.trigger_config.keywords)}</div>` : ''}
+          </div>
+          <div class="ch-actions" style="margin-top:8px">
+            <button class="btn btn-danger btn-sm" onclick="deleteWorkflowRule('${r.id}')">🗑️ Xóa</button>
+          </div>
+        </div>
+      `).join('');
+    }
+  } catch(e) {
+    document.getElementById('workflow-rules-list').innerHTML = `<div style="color:var(--red);padding:20px">❌ ${e.message}</div>`;
+  }
+
+  // Load templates
+  try {
+    const res = await authFetch(API + '/api/v1/workflows');
+    const data = await res.json();
+    const templates = data.workflows || [];
+    document.getElementById('workflow-templates-list').innerHTML = templates.map(w => `
+      <div style="padding:12px;margin-bottom:8px;background:var(--bg);border-radius:8px;border:1px solid var(--border)">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <strong style="color:var(--cyan)">${w.name}</strong>
+          <span class="badge badge-blue" style="font-size:10px">${(w.steps || []).length} steps</span>
+        </div>
+        <div style="font-size:12px;margin-top:4px;color:var(--text2)">${w.description || ''}</div>
+        <div style="font-size:11px;margin-top:6px;display:flex;gap:8px;flex-wrap:wrap">
+          ${(w.steps || []).map(s => `<span style="background:var(--bg2);padding:2px 8px;border-radius:4px;font-size:10px">${s.type}: ${s.name}</span>`).join('→ ')}
+        </div>
+      </div>
+    `).join('');
+  } catch(e) {}
+}
+
+function toggleWorkflowForm() {
+  const form = document.getElementById('workflow-add-form');
+  form.style.display = form.style.display === 'none' ? '' : 'none';
+}
+
+function wfTriggerChanged() {
+  const type = document.getElementById('wf-trigger-type').value;
+  const wrap = document.getElementById('wf-trigger-config-wrap');
+  if (type === 'message_keyword') {
+    wrap.innerHTML = '<label>Từ khóa (phân cách dấu phẩy)</label><input type="text" id="wf-trigger-keywords" placeholder="urgent, gấp, khẩn cấp">';
+  } else if (type === 'threshold') {
+    wrap.innerHTML = '<label>Metric</label><input type="text" id="wf-trigger-metric" placeholder="unanswered"><label>Operator</label><select id="wf-trigger-operator" style="width:100%;padding:8px;border-radius:6px;border:1px solid var(--border);background:var(--card);color:var(--text)"><option value=">">> (lớn hơn)</option><option value=">=">>= (lớn hơn hoặc bằng)</option><option value="<">< (nhỏ hơn)</option><option value="<=">>= (nhỏ hơn hoặc bằng)</option></select><label>Giá trị ngưỡng</label><input type="number" id="wf-trigger-value" placeholder="10">';
+  } else if (type === 'channel_event') {
+    wrap.innerHTML = '<label>Sự kiện</label><select id="wf-trigger-event" style="width:100%;padding:8px;border-radius:6px;border:1px solid var(--border);background:var(--card);color:var(--text)"><option value="new_member">Thành viên mới</option><option value="bot_added">Bot được thêm</option><option value="message_pinned">Ghim tin nhắn</option></select>';
+  } else {
+    wrap.innerHTML = '<div style="font-size:12px;color:var(--text2);padding:8px">Không cần cấu hình thêm cho trigger này.</div>';
+  }
+}
+
+function wfActionChanged() {
+  const type = document.getElementById('wf-action-type').value;
+  const wrap = document.getElementById('wf-action-config-wrap');
+  if (type === 'webhook') {
+    wrap.innerHTML = '<label>Webhook URL</label><input type="text" id="wf-action-url" placeholder="https://hooks.slack.com/..."><label>Nội dung (JSON)</label><textarea id="wf-action-content" placeholder=\'{"text": "Alert: {{event.text}}"}\' rows="3"></textarea>';
+  } else {
+    wrap.innerHTML = '<label>Prompt / Nội dung</label><textarea id="wf-action-content" placeholder="Phân tích tin nhắn từ {{event.sender}}: {{event.text}}" rows="3"></textarea>';
+  }
+}
+
+async function addWorkflowRule() {
+  const name = document.getElementById('wf-name').value.trim();
+  const triggerType = document.getElementById('wf-trigger-type').value;
+  const actionType = document.getElementById('wf-action-type').value;
+  const priority = parseInt(document.getElementById('wf-priority').value) || 10;
+  const cooldown = parseInt(document.getElementById('wf-cooldown').value) || 60;
+
+  if (!name) { toast('❌ Tên rule không được để trống'); return; }
+
+  // Build trigger config
+  let triggerConfig = {};
+  if (triggerType === 'message_keyword') {
+    const kw = (document.getElementById('wf-trigger-keywords')?.value || '').split(',').map(s => s.trim()).filter(Boolean);
+    if (kw.length === 0) { toast('❌ Nhập ít nhất 1 từ khóa'); return; }
+    triggerConfig = { keywords: kw };
+  } else if (triggerType === 'threshold') {
+    triggerConfig = {
+      metric: document.getElementById('wf-trigger-metric')?.value || '',
+      operator: document.getElementById('wf-trigger-operator')?.value || '>',
+      value: parseFloat(document.getElementById('wf-trigger-value')?.value) || 0,
+    };
+  } else if (triggerType === 'channel_event') {
+    triggerConfig = { event: document.getElementById('wf-trigger-event')?.value || 'new_member' };
+  }
+
+  // Build action config
+  const content = document.getElementById('wf-action-content')?.value || '';
+  let actionConfig = {};
+  if (actionType === 'agent_prompt') actionConfig = { prompt: content };
+  else if (actionType === 'notify') actionConfig = { message: content };
+  else if (actionType === 'send_message') actionConfig = { message: content, chat_id: '{{event.chat_id}}' };
+  else if (actionType === 'webhook') {
+    actionConfig = { url: document.getElementById('wf-action-url')?.value || '', body: content };
+  }
+
+  try {
+    const res = await authFetch(API + '/api/v1/workflow-rules', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ name, trigger_type: triggerType, trigger_config: triggerConfig, action_type: actionType, action_config: actionConfig, priority, cooldown_secs: cooldown }),
+    });
+    const r = await res.json();
+    if (r.ok) {
+      toast('✅ Rule "' + name + '" đã tạo!');
+      toggleWorkflowForm();
+      document.getElementById('wf-name').value = '';
+      await loadWorkflowRulesPage();
+    } else { toast('❌ ' + (r.error || 'Lỗi tạo rule')); }
+  } catch(e) { toast('❌ ' + e.message); }
+}
+
+async function deleteWorkflowRule(id) {
+  if (!confirm('Xóa workflow rule này?')) return;
+  try {
+    const res = await authFetch(API + '/api/v1/workflow-rules/' + encodeURIComponent(id), { method: 'DELETE' });
+    const r = await res.json();
+    if (r.ok) {
+      toast('✅ Đã xóa rule');
+      await loadWorkflowRulesPage();
+    } else { toast('❌ Không tìm thấy rule'); }
   } catch(e) { toast('❌ ' + e.message); }
 }
 

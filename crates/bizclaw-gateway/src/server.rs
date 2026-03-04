@@ -431,6 +431,9 @@ pub fn build_router_from_arc(shared: Arc<AppState>) -> Router {
         .route("/api/v1/mcp/servers", get(super::routes::mcp_list_servers))
         // Workflows + Skills + TTS API
         .route("/api/v1/workflows", get(super::routes::workflows_list))
+        .route("/api/v1/workflow-rules", get(super::routes::workflow_rules_list))
+        .route("/api/v1/workflow-rules", post(super::routes::workflow_rules_add))
+        .route("/api/v1/workflow-rules/{id}", axum::routing::delete(super::routes::workflow_rules_delete))
         .route("/api/v1/skills", get(super::routes::skills_list))
         .route("/api/v1/tts/voices", get(super::routes::tts_voices))
         .route("/ws", get(super::ws::ws_handler))

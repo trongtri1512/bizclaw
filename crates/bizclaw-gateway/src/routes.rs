@@ -2032,6 +2032,87 @@ pub async fn scheduler_notifications(
     Json(serde_json::json!({"ok": true, "notifications": history}))
 }
 
+// ---- Workflow Rules API ----
+
+/// List all workflow rules.
+pub async fn workflow_rules_list(
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    let sched_dir = state.config_path
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .join("scheduler");
+    let db = match bizclaw_scheduler::SchedulerDb::open(&sched_dir.join("scheduler.db")) {
+        Ok(db) => db,
+        Err(e) => return Json(serde_json::json!({"ok": false, "error": e})),
+    };
+    let rules: Vec<_> = db.load_workflow_rules().iter().map(|r| {
+        serde_json::json!({
+            "id": r.id,
+            "name": r.name,
+            "trigger_type": r.trigger_type,
+            "trigger_config": r.trigger_config,
+            "action_type": r.action_type,
+            "action_config": r.action_config,
+            "enabled": r.enabled,
+            "priority": r.priority,
+            "cooldown_secs": r.cooldown_secs,
+            "run_count": r.run_count,
+            "last_triggered": r.last_triggered.map(|t| t.to_rfc3339()),
+        })
+    }).collect();
+    Json(serde_json::json!({"ok": true, "rules": rules}))
+}
+
+/// Add a workflow rule.
+pub async fn workflow_rules_add(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    let name = body["name"].as_str().unwrap_or("untitled");
+    let trigger_type = body["trigger_type"].as_str().unwrap_or("message_keyword");
+    let trigger_config = body.get("trigger_config").cloned().unwrap_or(serde_json::json!({}));
+    let action_type = body["action_type"].as_str().unwrap_or("notify");
+    let action_config = body.get("action_config").cloned().unwrap_or(serde_json::json!({}));
+    let priority = body["priority"].as_i64().unwrap_or(10) as i32;
+    let cooldown = body["cooldown_secs"].as_u64().unwrap_or(60) as u64;
+
+    let mut rule = bizclaw_scheduler::persistence::WorkflowRule::new(
+        name, trigger_type, trigger_config, action_type, action_config,
+    );
+    rule.priority = priority;
+    rule.cooldown_secs = cooldown;
+
+    let sched_dir = state.config_path
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .join("scheduler");
+    let db = match bizclaw_scheduler::SchedulerDb::open(&sched_dir.join("scheduler.db")) {
+        Ok(db) => db,
+        Err(e) => return Json(serde_json::json!({"ok": false, "error": e})),
+    };
+    db.save_workflow_rule(&rule);
+
+    Json(serde_json::json!({"ok": true, "id": rule.id}))
+}
+
+/// Delete a workflow rule.
+pub async fn workflow_rules_delete(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Json<serde_json::Value> {
+    let sched_dir = state.config_path
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .join("scheduler");
+    let db = match bizclaw_scheduler::SchedulerDb::open(&sched_dir.join("scheduler.db")) {
+        Ok(db) => db,
+        Err(e) => return Json(serde_json::json!({"ok": false, "error": e})),
+    };
+    db.delete_workflow_rule(&id);
+    Json(serde_json::json!({"ok": true}))
+}
+
 // ---- Knowledge Base API ----
 
 /// Search the knowledge base.

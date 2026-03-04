@@ -111,6 +111,7 @@ persona = "{identity_persona}"
 system_prompt = """{system_prompt}"""
 
 [gateway]
+host = "0.0.0.0"
 port = {}
 "#,
             tenant.port

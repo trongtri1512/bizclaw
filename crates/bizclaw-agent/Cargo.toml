@@ -26,3 +26,4 @@ tracing.workspace = true
 futures.workspace = true
 chrono.workspace = true
 uuid.workspace = true
+reqwest.workspace = true

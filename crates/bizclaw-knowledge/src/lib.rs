@@ -1,11 +1,12 @@
 //! # BizClaw Knowledge Base
 //!
-//! Ultra-lightweight personal RAG (Retrieval-Augmented Generation).
-//! Designed for 512MB RAM devices — no vector DB, no embeddings.
+//! Personal RAG (Retrieval-Augmented Generation) with hybrid search.
+//! Works on 512MB RAM devices — no external vector DB needed.
 //!
 //! ## Design
-//! - **SQLite FTS5** for full-text search (built-in, zero setup)
-//! - **BM25 scoring** — relevance ranking without embeddings
+//! - **SQLite FTS5** for keyword search (BM25 scoring)
+//! - **Vector embeddings** via Ollama or OpenAI (stored as BLOB in SQLite)
+//! - **Hybrid search** — keyword (0.3) + vector similarity (0.7)
 //! - **Chunking** — split documents into ~500 char chunks
 //! - **File-based** — documents stored as-is, index in SQLite
 //! - RAM: ~2MB for 1000 document chunks
@@ -15,7 +16,7 @@
 //! User: "Chính sách làm việc từ xa ra sao?"
 //!   ↓
 //! Knowledge.search("chính sách làm việc từ xa")
-//!   ↓ FTS5 + BM25
+//!   ↓ FTS5 + BM25 + Vector Cosine Similarity
 //! Top 3 chunks from uploaded documents
 //!   ↓
 //! Injected into Agent system prompt as context
@@ -24,8 +25,10 @@
 //! ```
 
 pub mod chunker;
+pub mod embeddings;
 pub mod search;
 pub mod store;
+pub mod vector_store;
 
 #[cfg(feature = "pdf")]
 pub mod pdf;

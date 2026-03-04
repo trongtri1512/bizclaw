@@ -433,14 +433,36 @@ impl Agent {
 
 
     /// Search the knowledge base for relevant context.
+    /// Uses hybrid search (keyword + vector) when embeddings are available.
     async fn search_knowledge(&self, query: &str) -> Option<String> {
+        // IMPORTANT: Get embedding BEFORE acquiring kb lock.
+        // rusqlite::Connection is not Send, so the MutexGuard cannot be
+        // held across .await points (like the reqwest call for embeddings).
+        let query_embedding = self.get_query_embedding(query).await;
+
         let kb_arc = self.knowledge.as_ref()?;
         let kb_lock = kb_arc.lock().await;
         let kb = kb_lock.as_ref()?;
 
-        let results = kb.search(query, 3);
+        // Hybrid search: keyword (BM25) + vector (cosine similarity)
+        let emb_ref = query_embedding.as_deref();
+        let results = kb.hybrid_search(query, emb_ref, 3);
+
         if results.is_empty() {
-            return None;
+            // Fallback to basic FTS5 search
+            let basic = kb.search(query, 3);
+            if basic.is_empty() {
+                return None;
+            }
+            let mut context = String::new();
+            for (i, r) in basic.iter().enumerate() {
+                let entry = format!("{}. [{}] {}\n", i + 1, r.doc_name, r.content);
+                if context.len() + entry.len() > 1500 {
+                    break;
+                }
+                context.push_str(&entry);
+            }
+            return Some(context);
         }
 
         let mut context = String::new();
@@ -453,11 +475,54 @@ impl Agent {
         }
 
         tracing::debug!(
-            "Knowledge RAG: {} results, {} chars",
+            "Knowledge RAG: {} results (hybrid), {} chars",
             results.len(),
             context.len()
         );
         Some(context)
+    }
+
+    /// Generate embedding for a query string (via Ollama or configured provider).
+    /// Returns None if embeddings are not available.
+    async fn get_query_embedding(&self, query: &str) -> Option<Vec<f32>> {
+        // Try Ollama endpoint for embeddings
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .ok()?;
+
+        let endpoint = std::env::var("OLLAMA_HOST")
+            .unwrap_or_else(|_| "http://localhost:11434".to_string());
+
+        let body = serde_json::json!({
+            "model": "nomic-embed-text",
+            "input": [query]
+        });
+
+        let resp = client
+            .post(format!("{}/api/embed", endpoint))
+            .json(&body)
+            .send()
+            .await
+            .ok()?;
+
+        if !resp.status().is_success() {
+            return None;
+        }
+
+        let result: serde_json::Value = resp.json().await.ok()?;
+        let embeddings = result.get("embeddings")?.as_array()?;
+        let first = embeddings.first()?.as_array()?;
+        let vec: Vec<f32> = first
+            .iter()
+            .filter_map(|v: &serde_json::Value| v.as_f64().map(|f| f as f32))
+            .collect();
+
+        if vec.is_empty() {
+            None
+        } else {
+            Some(vec)
+        }
     }
 
     /// Retrieve relevant past conversations from memory (FTS5-powered).

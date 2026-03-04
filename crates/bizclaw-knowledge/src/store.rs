@@ -224,4 +224,62 @@ impl KnowledgeStore {
             .unwrap_or(0);
         (doc_count as usize, chunk_count as usize)
     }
+
+    // ── Vector RAG Methods ──────────────────────────────────────────
+
+    /// Enable vector search by creating the embeddings table.
+    pub fn enable_vectors(&self) -> Result<(), String> {
+        crate::vector_store::ensure_vector_schema(&self.conn)
+    }
+
+    /// Hybrid search: keyword (BM25) + vector (cosine similarity).
+    /// If query_embedding is None, falls back to keyword-only search.
+    pub fn hybrid_search(
+        &self,
+        query: &str,
+        query_embedding: Option<&[f32]>,
+        limit: usize,
+    ) -> Vec<SearchResult> {
+        crate::vector_store::hybrid_search(
+            &self.conn,
+            query,
+            query_embedding,
+            limit,
+            0.3,  // keyword weight
+            0.7,  // vector weight
+        )
+    }
+
+    /// Get count of chunks that have embeddings.
+    pub fn embedded_count(&self) -> usize {
+        crate::vector_store::embedded_chunk_count(&self.conn)
+    }
+
+    /// Store embedding for a specific chunk.
+    pub fn store_chunk_embedding(
+        &self,
+        doc_id: &str,
+        chunk_idx: &str,
+        embedding: &[f32],
+    ) -> Result<(), String> {
+        crate::vector_store::store_embedding(&self.conn, doc_id, chunk_idx, embedding)
+    }
+
+    /// Get all chunk texts that are missing embeddings (for batch embedding).
+    pub fn chunks_without_embeddings(&self) -> Vec<(String, String, String)> {
+        self.enable_vectors().ok();
+        let mut stmt = match self.conn.prepare(
+            "SELECT c.doc_id, c.chunk_idx, c.content FROM chunks c
+             LEFT JOIN chunk_embeddings ce ON ce.doc_id = c.doc_id AND ce.chunk_idx = c.chunk_idx
+             WHERE ce.embedding IS NULL"
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        stmt.query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        .unwrap_or_default()
+    }
 }
