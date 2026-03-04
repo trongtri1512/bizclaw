@@ -29,3 +29,6 @@ scripts/
 # OS
 Thumbs.db
 mission-control/
+
+# Sensitive deploy workflow (credentials)
+_agents/workflows/deploy.md
