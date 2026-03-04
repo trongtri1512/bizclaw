@@ -13,7 +13,7 @@
 
 [![Rust](https://img.shields.io/badge/Rust-100%25-orange?logo=rust)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-144%20passing-brightgreen)]()
+[![Tests](https://img.shields.io/badge/tests-342%20passing-brightgreen)]()
 [![Website](https://img.shields.io/badge/🌐_Website-bizclaw.vn-blue)](https://bizclaw.vn)
 [![Facebook](https://img.shields.io/badge/📘_Fanpage-bizclaw.vn-1877F2?logo=facebook)](https://www.facebook.com/bizclaw.vn)
 
@@ -275,7 +275,7 @@ args = ["-y", "@modelcontextprotocol/server-github"]
 | **Language** | 100% Rust + Kotlin (Android) |
 | **Crates** | 19 |
 | **Lines of Code** | ~48,000 |
-| **Tests** | 144 passing |
+| **Tests** | 342 passing |
 | **Binary Size** | bizclaw 12MB |
 | **Last Updated** | 2026-03-05 |
 
