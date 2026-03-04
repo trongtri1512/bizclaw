@@ -1466,7 +1466,7 @@ function AgentsPage({ config, lang }) {
   const [form,setForm] = useState({name:'',role:'',description:'',system_prompt:'',provider:'',model:''});
 
   const load = async () => {
-    try { const r=await authFetch('/api/v1/agents');const d=await r.json();setAgents(d.agents||[]); } catch(e){}
+    try { const r=await authFetch('/api/v1/agents');const d=await r.json();setAgents(d.agents||[]); } catch(e){ console.error('AgentsPage load error:', e); }
     setLoading(false);
   };
   useEffect(()=>{ load(); },[]);
@@ -1510,7 +1510,7 @@ function AgentsPage({ config, lang }) {
     <div class="page-header"><div><h1>🤖 ${t('agents.title',lang)}</h1><div class="sub">${t('agents.subtitle',lang)}</div></div>
       <button class="btn" style="background:var(--grad1);color:#fff;padding:8px 18px" onClick=${openCreate}>+ Tạo Agent</button>
     </div>
-    <div class="stats"><${StatsCard} label=${t('agents.total',lang)} value=${agents.length||1} color="accent" icon="🤖" /></div>
+    <div class="stats"><${StatsCard} label=${t('agents.total',lang)} value=${agents.length} color="accent" icon="🤖" /></div>
 
     ${showForm && html`
       <div class="card" style="margin-bottom:14px;border:1px solid var(--accent)">
@@ -2503,9 +2503,9 @@ function ChatWidget() {
 }
 
 export function App() {
-  // Read current page from URL (reliable since we use full page reloads)
-  const path = location.pathname.replace(/^\//, '').replace(/\/$/, '');
-  const currentPage = path || 'dashboard';
+  // Read current page from URL for initial load
+  const initPage = location.pathname.replace(/^\//, '').replace(/\/$/, '') || 'dashboard';
+  const [currentPage, setCurrentPage] = useState(initPage);
   const [lang, setLang] = useState(localStorage.getItem('bizclaw_lang') || 'vi');
   const [wsStatus, setWsStatus] = useState('disconnected');
   const [config, setConfig] = useState({});
@@ -2597,21 +2597,21 @@ export function App() {
   // History API: handle browser back/forward
   useEffect(() => {
     const handlePop = () => {
-      // Page reload on back/forward since we use location.pathname navigation
-      location.reload();
+      const p = location.pathname.replace(/^\//, '').replace(/\/$/, '') || 'dashboard';
+      setCurrentPage(p);
     };
     window.addEventListener('popstate', handlePop);
     return () => window.removeEventListener('popstate', handlePop);
   }, []);
 
-  // Navigate: use location.pathname for reliable full page transitions.
-  // Preact's internal render queue is stuck (__d flag issue), so we use
-  // a soft reload instead. The Rust server serves index.html for all routes,
-  // and URL-based initial routing works perfectly.
+  // Navigate: client-side state routing — NO full page reloads.
+  // Updates URL via pushState and sets state to trigger Preact re-render.
+  // This ensures useEffect hooks in page components fire correctly.
   const navigate = useCallback((pageId) => {
     const path = '/' + (pageId === 'dashboard' ? '' : pageId);
     if (location.pathname !== path) {
-      location.pathname = path;
+      history.pushState({}, '', path);
+      setCurrentPage(pageId);
     }
   }, []);
 
@@ -2651,7 +2651,7 @@ export function App() {
           agentName=${config?.agent_name || 'BizClaw Agent'}
         />
         <main class="main">
-          <${PageRouter} page=${currentPage} config=${config} lang=${lang} />
+          <${PageRouter} key=${currentPage} page=${currentPage} config=${config} lang=${lang} />
         </main>
       </div>
       <${Toast} ...${toast || {}} />
