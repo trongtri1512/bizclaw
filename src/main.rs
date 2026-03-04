@@ -163,9 +163,16 @@ async fn main() -> Result<()> {
         .with_target(false)
         .init();
 
-    // Load config
+    // Load config: CLI flag → BIZCLAW_CONFIG env var → default path
     let mut config = if let Some(path) = &cli.config {
         bizclaw_core::BizClawConfig::load_from(std::path::Path::new(path))?
+    } else if let Ok(env_path) = std::env::var("BIZCLAW_CONFIG") {
+        let p = std::path::Path::new(&env_path);
+        if p.exists() {
+            bizclaw_core::BizClawConfig::load_from(p)?
+        } else {
+            bizclaw_core::BizClawConfig::load()?
+        }
     } else {
         bizclaw_core::BizClawConfig::load()?
     };

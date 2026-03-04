@@ -363,7 +363,7 @@ port = {}
         let stderr = log_file.map(std::process::Stdio::from).unwrap_or(std::process::Stdio::null());
 
         let mut cmd = Command::new(bizclaw_bin);
-        cmd.args(["serve", "--port", &tenant.port.to_string()])
+        cmd.args(["serve", "--port", &tenant.port.to_string(), "--config", config_path.to_str().unwrap_or("")])
             .env("BIZCLAW_CONFIG", config_path.to_str().unwrap_or(""))
             .env("BIZCLAW_DATA_DIR", tenant_dir.to_str().unwrap_or(""));
 
