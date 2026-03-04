@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BizClaw — Agent Dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/dashboard/styles.css">
+<!--
+  SELF-HOSTED VENDOR FILES: preact.mjs, hooks.mjs, htm.mjs
+  
+  These are self-hosted to eliminate the esm.sh CDN dual-package hazard.
+  The hooks module imports preact via relative path: import{options}from"./preact.mjs"
+  When self-hosted in the same directory, this relative import resolves to
+  the EXACT same preact.mjs file, guaranteeing a single Preact instance.
+  
+  Previously, using separate esm.sh URLs caused the browser to load two
+  different copies of Preact's options singleton, which silently broke
+  hooks (useState, useEffect) — state updates never triggered re-renders.
+-->
+<script type="importmap">
+{
+  "imports": {
+    "preact": "/static/dashboard/vendor/preact.mjs",
+    "preact/hooks": "/static/dashboard/vendor/hooks.mjs",
+    "htm": "/static/dashboard/vendor/htm.mjs"
+  }
+}
+</script>
+</head>
+<body>
+<div id="app"></div>
+<script type="module">
+// Preact + HTM — self-hosted vendor files (no CDN, no dual-package hazard)
+import { h, render, Component, createContext } from 'preact';
+import { useState, useEffect, useContext, useCallback, useRef, useMemo } from 'preact/hooks';
+import htm from 'htm';
+const html = htm.bind(h);
+
+// Make available globally for page modules (app.js uses window.* destructuring)
+window.h = h; window.html = html; window.render = render;
+window.useState = useState; window.useEffect = useEffect;
+window.useContext = useContext; window.useCallback = useCallback;
+window.useRef = useRef; window.useMemo = useMemo;
+window.createContext = createContext;
+
+// Load app module
+const { App } = await import('/static/dashboard/app.js');
+const appRoot = document.getElementById('app');
+
+// Initial render
+render(html`<${App} />`, appRoot);
+</script>
+</body>
+</html>

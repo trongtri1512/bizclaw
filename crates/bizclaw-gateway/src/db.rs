@@ -1,0 +1,794 @@
+//! Gateway per-tenant SQLite database.
+//!
+//! Replaces flat-file storage (agents.json, agent-channels.json, hardcoded providers)
+//! with a proper SQLite database for reliable CRUD operations.
+//!
+//! Provider records are fully self-describing: they store base_url, chat_path,
+//! models_path, auth_style, env_keys, icon, label — so the dashboard and runtime
+//! can operate entirely from DB without any hardcoded metadata.
+
+use rusqlite::{Connection, params};
+use std::path::Path;
+use std::sync::Mutex;
+
+/// Gateway database — per-tenant persistent storage.
+pub struct GatewayDb {
+    conn: Mutex<Connection>,
+}
+
+/// Provider record — fully self-describing, no hardcoded metadata needed.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Provider {
+    pub name: String,
+    pub label: String,
+    pub icon: String,
+    pub provider_type: String,  // cloud, local, proxy
+    pub api_key: String,
+    pub base_url: String,
+    pub chat_path: String,
+    pub models_path: String,
+    pub auth_style: String,     // bearer, none
+    pub env_keys: Vec<String>,  // env var names for API key lookup
+    pub models: Vec<String>,    // cached/default model IDs
+    pub is_active: bool,
+    pub enabled: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Agent record stored in DB.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AgentRecord {
+    pub name: String,
+    pub role: String,
+    pub description: String,
+    pub provider: String,
+    pub model: String,
+    pub system_prompt: String,
+    pub enabled: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Agent-Channel binding.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AgentChannelBinding {
+    pub agent_name: String,
+    pub channel_type: String,
+    pub instance_id: String,
+}
+
+impl GatewayDb {
+    /// Open or create the gateway database.
+    pub fn open(path: &Path) -> Result<Self, String> {
+        let conn = Connection::open(path)
+            .map_err(|e| format!("Gateway DB open error: {e}"))?;
+        
+        // Enable WAL mode for better concurrent read performance
+        conn.execute_batch("PRAGMA journal_mode=WAL;").ok();
+        
+        let db = Self { conn: Mutex::new(conn) };
+        db.migrate()?;
+        db.seed_default_providers()?;
+        Ok(db)
+    }
+
+    /// Run schema migrations.
+    fn migrate(&self) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| format!("Lock: {e}"))?;
+        
+        // Main tables
+        conn.execute_batch("
+            CREATE TABLE IF NOT EXISTS providers (
+                name TEXT PRIMARY KEY,
+                label TEXT DEFAULT '',
+                icon TEXT DEFAULT '🤖',
+                provider_type TEXT DEFAULT 'cloud',
+                api_key TEXT DEFAULT '',
+                base_url TEXT DEFAULT '',
+                chat_path TEXT DEFAULT '/chat/completions',
+                models_path TEXT DEFAULT '/models',
+                auth_style TEXT DEFAULT 'bearer',
+                env_keys_json TEXT DEFAULT '[]',
+                models_json TEXT DEFAULT '[]',
+                is_active INTEGER DEFAULT 0,
+                enabled INTEGER DEFAULT 1,
+                created_at TEXT DEFAULT (datetime('now')),
+                updated_at TEXT DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS agents (
+                name TEXT PRIMARY KEY,
+                role TEXT DEFAULT 'assistant',
+                description TEXT DEFAULT '',
+                provider TEXT DEFAULT '',
+                model TEXT DEFAULT '',
+                system_prompt TEXT DEFAULT '',
+                enabled INTEGER DEFAULT 1,
+                created_at TEXT DEFAULT (datetime('now')),
+                updated_at TEXT DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS agent_channels (
+                agent_name TEXT NOT NULL,
+                channel_type TEXT NOT NULL,
+                instance_id TEXT DEFAULT '',
+                created_at TEXT DEFAULT (datetime('now')),
+                PRIMARY KEY (agent_name, channel_type, instance_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT DEFAULT '',
+                updated_at TEXT DEFAULT (datetime('now'))
+            );
+        ").map_err(|e| format!("Migration error: {e}"))?;
+        
+        // Migration: add new columns to existing providers table
+        // SQLite doesn't have IF NOT EXISTS for ALTER TABLE, so we check first
+        let has_label: bool = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('providers') WHERE name='label'",
+            [], |r| r.get::<_, i64>(0),
+        ).unwrap_or(0) > 0;
+        
+        if !has_label {
+            conn.execute_batch("
+                ALTER TABLE providers ADD COLUMN label TEXT DEFAULT '';
+                ALTER TABLE providers ADD COLUMN icon TEXT DEFAULT '🤖';
+                ALTER TABLE providers ADD COLUMN chat_path TEXT DEFAULT '/chat/completions';
+                ALTER TABLE providers ADD COLUMN models_path TEXT DEFAULT '/models';
+                ALTER TABLE providers ADD COLUMN auth_style TEXT DEFAULT 'bearer';
+                ALTER TABLE providers ADD COLUMN env_keys_json TEXT DEFAULT '[]';
+            ").map_err(|e| format!("Migration add columns: {e}"))?;
+        }
+        
+        Ok(())
+    }
+
+    /// Seed default providers — ensures all built-in providers exist.
+    /// Uses INSERT OR IGNORE so existing providers (with user-set API keys) are preserved.
+    fn seed_default_providers(&self) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| format!("Lock: {e}"))?;
+
+        // Each provider definition is fully self-describing:
+        // (name, label, icon, type, base_url, chat_path, models_path, auth_style, env_keys_json, models_json)
+        #[allow(clippy::type_complexity)]
+        let defaults: Vec<(&str, &str, &str, &str, &str, &str, &str, &str, &str, &str)> = vec![
+            (
+                "openai", "OpenAI", "🤖", "cloud",
+                "https://api.openai.com/v1",
+                "/chat/completions", "/models", "bearer",
+                r#"["OPENAI_API_KEY"]"#,
+                r#"["gpt-4.1","gpt-4.1-mini","gpt-4.1-nano","gpt-4o","gpt-4o-mini","o3","o3-mini","o4-mini"]"#,
+            ),
+            (
+                "anthropic", "Anthropic", "🧠", "cloud",
+                "https://api.anthropic.com/v1",
+                "/chat/completions", "/models", "bearer",
+                r#"["ANTHROPIC_API_KEY"]"#,
+                r#"["claude-sonnet-4-20250514","claude-opus-4-20250514","claude-3.5-haiku-20241022"]"#,
+            ),
+            (
+                "gemini", "Google Gemini", "💎", "cloud",
+                "https://generativelanguage.googleapis.com/v1beta/openai",
+                "/chat/completions", "/models", "bearer",
+                r#"["GEMINI_API_KEY","GOOGLE_API_KEY"]"#,
+                r#"["gemini-2.5-pro-preview-06-05","gemini-2.5-flash-preview-05-20","gemini-2.0-flash","gemini-2.0-flash-lite"]"#,
+            ),
+            (
+                "deepseek", "DeepSeek", "🌊", "cloud",
+                "https://api.deepseek.com",
+                "/chat/completions", "/models", "bearer",
+                r#"["DEEPSEEK_API_KEY"]"#,
+                r#"["deepseek-chat","deepseek-reasoner"]"#,
+            ),
+            (
+                "groq", "Groq", "⚡", "cloud",
+                "https://api.groq.com/openai/v1",
+                "/chat/completions", "/models", "bearer",
+                r#"["GROQ_API_KEY"]"#,
+                r#"["llama-3.3-70b-versatile","llama-3.1-8b-instant","gemma2-9b-it","mixtral-8x7b-32768"]"#,
+            ),
+            (
+                "openrouter", "OpenRouter", "🌐", "cloud",
+                "https://openrouter.ai/api/v1",
+                "/chat/completions", "/models", "bearer",
+                r#"["OPENROUTER_API_KEY","OPENAI_API_KEY"]"#,
+                r#"["openai/gpt-4.1","anthropic/claude-sonnet-4","google/gemini-2.5-flash-preview","deepseek/deepseek-r1"]"#,
+            ),
+            (
+                "together", "Together AI", "🤝", "cloud",
+                "https://api.together.xyz/v1",
+                "/chat/completions", "/models", "bearer",
+                r#"["TOGETHER_API_KEY"]"#,
+                r#"["meta-llama/Llama-3.3-70B-Instruct-Turbo","Qwen/Qwen2.5-72B-Instruct-Turbo","deepseek-ai/DeepSeek-R1"]"#,
+            ),
+            (
+                "minimax", "MiniMax", "🔮", "cloud",
+                "https://api.minimaxi.chat/v1",
+                "/chat/completions", "/models", "bearer",
+                r#"["MINIMAX_API_KEY"]"#,
+                r#"["MiniMax-Text-01","MiniMax-M1","abab6.5s-chat","abab6.5-chat","abab5.5-chat"]"#,
+            ),
+            (
+                "xai", "xAI (Grok)", "🚀", "cloud",
+                "https://api.x.ai/v1",
+                "/chat/completions", "/models", "bearer",
+                r#"["XAI_API_KEY"]"#,
+                r#"["grok-3","grok-3-mini","grok-3-fast","grok-2"]"#,
+            ),
+            (
+                "mistral", "Mistral AI", "🌪️", "cloud",
+                "https://api.mistral.ai/v1",
+                "/chat/completions", "/models", "bearer",
+                r#"["MISTRAL_API_KEY"]"#,
+                r#"["mistral-large-latest","mistral-medium-latest","mistral-small-latest","codestral-latest","open-mistral-nemo"]"#,
+            ),
+            (
+                "ollama", "Ollama (Local)", "🦙", "local",
+                "http://localhost:11434/v1",
+                "/chat/completions", "/models", "none",
+                r#"[]"#,
+                r#"["llama3.2","qwen3","phi-4","gemma2","deepseek-r1"]"#,
+            ),
+            (
+                "llamacpp", "llama.cpp", "🔧", "local",
+                "http://localhost:8080/v1",
+                "/chat/completions", "/models", "none",
+                r#"[]"#,
+                r#"["local-model"]"#,
+            ),
+            (
+                "brain", "Brain Engine", "🧲", "local",
+                "",
+                "", "", "none",
+                r#"[]"#,
+                r#"["tinyllama-1.1b","phi-2","llama-3.2-1b"]"#,
+            ),
+            (
+                "cliproxy", "CLIProxyAPI", "🔌", "proxy",
+                "http://localhost:8888/v1",
+                "/chat/completions", "/models", "bearer",
+                r#"["CLIPROXY_API_KEY"]"#,
+                r#"["default"]"#,
+            ),
+            (
+                "vllm", "vLLM", "🚀", "local",
+                "http://localhost:8000/v1",
+                "/chat/completions", "/models", "none",
+                r#"["VLLM_API_KEY"]"#,
+                r#"["default"]"#,
+            ),
+            (
+                "modelark", "BytePlus ModelArk", "🔥", "cloud",
+                "https://ark.ap-southeast.bytepluses.com/api/v3",
+                "/chat/completions", "/models", "bearer",
+                r#"["ARK_API_KEY","VOLC_ACCESSKEY"]"#,
+                r#"["seed-2-0-mini-260215","seed-1-8-251228","deepseek-v3-2-251201","doubao-1-5-pro-256k-250115","doubao-1-5-pro-32k-250115","glm-4-7-251222"]"#,
+            ),
+        ];
+
+        for (name, label, icon, ptype, base_url, chat_path, models_path, auth_style, env_keys, models) in defaults {
+            conn.execute(
+                "INSERT OR IGNORE INTO providers (name, label, icon, provider_type, base_url, chat_path, models_path, auth_style, env_keys_json, models_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![name, label, icon, ptype, base_url, chat_path, models_path, auth_style, env_keys, models],
+            ).ok();
+        }
+        Ok(())
+    }
+
+    // ── Provider CRUD ──────────────────────────────
+
+    /// List all providers.
+    pub fn list_providers(&self, active_provider: &str) -> Result<Vec<Provider>, String> {
+        let conn = self.conn.lock().map_err(|e| format!("Lock: {e}"))?;
+        let mut stmt = conn.prepare(
+            "SELECT name, label, icon, provider_type, api_key, base_url, chat_path, models_path, auth_style, env_keys_json, models_json, is_active, enabled, created_at, updated_at FROM providers ORDER BY name"
+        ).map_err(|e| format!("Prepare: {e}"))?;
+
+        let providers = stmt.query_map([], |row| {
+            let name: String = row.get(0)?;
+            let models_json: String = row.get(10)?;
+            let models: Vec<String> = serde_json::from_str(&models_json).unwrap_or_default();
+            let env_keys_json: String = row.get(9)?;
+            let env_keys: Vec<String> = serde_json::from_str(&env_keys_json).unwrap_or_default();
+            Ok(Provider {
+                name: name.clone(),
+                label: row.get(1)?,
+                icon: row.get(2)?,
+                provider_type: row.get(3)?,
+                api_key: row.get(4)?,
+                base_url: row.get(5)?,
+                chat_path: row.get(6)?,
+                models_path: row.get(7)?,
+                auth_style: row.get(8)?,
+                env_keys,
+                models,
+                is_active: name == active_provider, // derive from runtime config
+                enabled: row.get::<_, i32>(12)? != 0,
+                created_at: row.get(13)?,
+                updated_at: row.get(14)?,
+            })
+        }).map_err(|e| format!("Query: {e}"))?
+        .filter_map(|r| r.ok())
+        .collect();
+
+        Ok(providers)
+    }
+
+    /// Create or update a provider.
+    #[allow(clippy::too_many_arguments)]
+    pub fn upsert_provider(
+        &self,
+        name: &str,
+        label: &str,
+        icon: &str,
+        provider_type: &str,
+        api_key: &str,
+        base_url: &str,
+        chat_path: &str,
+        models_path: &str,
+        auth_style: &str,
+        env_keys: &[String],
+        models: &[String],
+    ) -> Result<Provider, String> {
+        let conn = self.conn.lock().map_err(|e| format!("Lock: {e}"))?;
+        let models_json = serde_json::to_string(models).unwrap_or_else(|_| "[]".to_string());
+        let env_keys_json = serde_json::to_string(env_keys).unwrap_or_else(|_| "[]".to_string());
+        
+        conn.execute(
+            "INSERT INTO providers (name, label, icon, provider_type, api_key, base_url, chat_path, models_path, auth_style, env_keys_json, models_json, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, datetime('now'))
+             ON CONFLICT(name) DO UPDATE SET
+               label=?2, icon=?3, provider_type=?4, api_key=?5, base_url=?6, chat_path=?7,
+               models_path=?8, auth_style=?9, env_keys_json=?10, models_json=?11, updated_at=datetime('now')",
+            params![name, label, icon, provider_type, api_key, base_url, chat_path, models_path, auth_style, env_keys_json, models_json],
+        ).map_err(|e| format!("Upsert provider: {e}"))?;
+
+        // Read back using SAME connection — do NOT call self.get_provider() which would deadlock
+        conn.query_row(
+            "SELECT name, label, icon, provider_type, api_key, base_url, chat_path, models_path, auth_style, env_keys_json, models_json, is_active, enabled, created_at, updated_at FROM providers WHERE name=?1",
+            params![name],
+            |row| {
+                let models_json_str: String = row.get(10)?;
+                let models_vec: Vec<String> = serde_json::from_str(&models_json_str).unwrap_or_default();
+                let env_keys_str: String = row.get(9)?;
+                let env_keys_vec: Vec<String> = serde_json::from_str(&env_keys_str).unwrap_or_default();
+                Ok(Provider {
+                    name: row.get(0)?,
+                    label: row.get(1)?,
+                    icon: row.get(2)?,
+                    provider_type: row.get(3)?,
+                    api_key: row.get(4)?,
+                    base_url: row.get(5)?,
+                    chat_path: row.get(6)?,
+                    models_path: row.get(7)?,
+                    auth_style: row.get(8)?,
+                    env_keys: env_keys_vec,
+                    models: models_vec,
+                    is_active: row.get::<_, i32>(11)? != 0,
+                    enabled: row.get::<_, i32>(12)? != 0,
+                    created_at: row.get(13)?,
+                    updated_at: row.get(14)?,
+                })
+            },
+        ).map_err(|e| format!("Get provider after upsert: {e}"))
+    }
+
+    /// Get a single provider.
+    pub fn get_provider(&self, name: &str) -> Result<Provider, String> {
+        let conn = self.conn.lock().map_err(|e| format!("Lock: {e}"))?;
+        conn.query_row(
+            "SELECT name, label, icon, provider_type, api_key, base_url, chat_path, models_path, auth_style, env_keys_json, models_json, is_active, enabled, created_at, updated_at FROM providers WHERE name=?1",
+            params![name],
+            |row| {
+                let models_json: String = row.get(10)?;
+                let models: Vec<String> = serde_json::from_str(&models_json).unwrap_or_default();
+                let env_keys_json: String = row.get(9)?;
+                let env_keys: Vec<String> = serde_json::from_str(&env_keys_json).unwrap_or_default();
+                Ok(Provider {
+                    name: row.get(0)?,
+                    label: row.get(1)?,
+                    icon: row.get(2)?,
+                    provider_type: row.get(3)?,
+                    api_key: row.get(4)?,
+                    base_url: row.get(5)?,
+                    chat_path: row.get(6)?,
+                    models_path: row.get(7)?,
+                    auth_style: row.get(8)?,
+                    env_keys,
+                    models,
+                    is_active: row.get::<_, i32>(11)? != 0,
+                    enabled: row.get::<_, i32>(12)? != 0,
+                    created_at: row.get(13)?,
+                    updated_at: row.get(14)?,
+                })
+            },
+        ).map_err(|e| format!("Get provider: {e}"))
+    }
+
+    /// Delete a provider.
+    pub fn delete_provider(&self, name: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| format!("Lock: {e}"))?;
+        conn.execute("DELETE FROM providers WHERE name=?1", params![name])
+            .map_err(|e| format!("Delete provider: {e}"))?;
+        Ok(())
+    }
+
+    /// Update provider API key and/or base URL.
+    pub fn update_provider_config(
+        &self,
+        name: &str,
+        api_key: Option<&str>,
+        base_url: Option<&str>,
+    ) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| format!("Lock: {e}"))?;
+        if let Some(key) = api_key {
+            conn.execute(
+                "UPDATE providers SET api_key=?1, updated_at=datetime('now') WHERE name=?2",
+                params![key, name],
+            ).map_err(|e| format!("Update api_key: {e}"))?;
+        }
+        if let Some(url) = base_url {
+            conn.execute(
+                "UPDATE providers SET base_url=?1, updated_at=datetime('now') WHERE name=?2",
+                params![url, name],
+            ).map_err(|e| format!("Update base_url: {e}"))?;
+        }
+        Ok(())
+    }
+
+    /// Update cached models list for a provider.
+    pub fn update_provider_models(&self, name: &str, models: &[String]) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| format!("Lock: {e}"))?;
+        let models_json = serde_json::to_string(models).unwrap_or_else(|_| "[]".to_string());
+        conn.execute(
+            "UPDATE providers SET models_json=?1, updated_at=datetime('now') WHERE name=?2",
+            params![models_json, name],
+        ).map_err(|e| format!("Update models: {e}"))?;
+        Ok(())
+    }
+
+    // ── Agent CRUD ──────────────────────────────
+
+    /// Create or update an agent.
+    pub fn upsert_agent(
+        &self,
+        name: &str,
+        role: &str,
+        description: &str,
+        provider: &str,
+        model: &str,
+        system_prompt: &str,
+    ) -> Result<AgentRecord, String> {
+        let conn = self.conn.lock().map_err(|e| format!("Lock: {e}"))?;
+        conn.execute(
+            "INSERT INTO agents (name, role, description, provider, model, system_prompt, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, datetime('now'))
+             ON CONFLICT(name) DO UPDATE SET
+               role=?2, description=?3, provider=?4, model=?5, system_prompt=?6, updated_at=datetime('now')",
+            params![name, role, description, provider, model, system_prompt],
+        ).map_err(|e| format!("Upsert agent: {e}"))?;
+
+        // Read back using SAME connection — do NOT call self.get_agent() which would deadlock
+        conn.query_row(
+            "SELECT name, role, description, provider, model, system_prompt, enabled, created_at, updated_at FROM agents WHERE name=?1",
+            params![name],
+            |row| Ok(AgentRecord {
+                name: row.get(0)?, role: row.get(1)?, description: row.get(2)?,
+                provider: row.get(3)?, model: row.get(4)?, system_prompt: row.get(5)?,
+                enabled: row.get::<_, i32>(6)? != 0,
+                created_at: row.get(7)?, updated_at: row.get(8)?,
+            }),
+        ).map_err(|e| format!("Get agent after upsert: {e}"))
+    }
+
+    /// Get a single agent.
+    pub fn get_agent(&self, name: &str) -> Result<AgentRecord, String> {
+        let conn = self.conn.lock().map_err(|e| format!("Lock: {e}"))?;
+        conn.query_row(
+            "SELECT name, role, description, provider, model, system_prompt, enabled, created_at, updated_at FROM agents WHERE name=?1",
+            params![name],
+            |row| Ok(AgentRecord {
+                name: row.get(0)?, role: row.get(1)?, description: row.get(2)?,
+                provider: row.get(3)?, model: row.get(4)?, system_prompt: row.get(5)?,
+                enabled: row.get::<_, i32>(6)? != 0,
+                created_at: row.get(7)?, updated_at: row.get(8)?,
+            }),
+        ).map_err(|e| format!("Get agent: {e}"))
+    }
+
+    /// List all agents.
+    pub fn list_agents(&self) -> Result<Vec<AgentRecord>, String> {
+        let conn = self.conn.lock().map_err(|e| format!("Lock: {e}"))?;
+        let mut stmt = conn.prepare(
+            "SELECT name, role, description, provider, model, system_prompt, enabled, created_at, updated_at FROM agents ORDER BY name"
+        ).map_err(|e| format!("Prepare: {e}"))?;
+
+        let agents = stmt.query_map([], |row| {
+            Ok(AgentRecord {
+                name: row.get(0)?, role: row.get(1)?, description: row.get(2)?,
+                provider: row.get(3)?, model: row.get(4)?, system_prompt: row.get(5)?,
+                enabled: row.get::<_, i32>(6)? != 0,
+                created_at: row.get(7)?, updated_at: row.get(8)?,
+            })
+        }).map_err(|e| format!("Query: {e}"))?
+        .filter_map(|r| r.ok())
+        .collect();
+        Ok(agents)
+    }
+
+    /// Delete an agent.
+    pub fn delete_agent(&self, name: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| format!("Lock: {e}"))?;
+        conn.execute("DELETE FROM agents WHERE name=?1", params![name])
+            .map_err(|e| format!("Delete agent: {e}"))?;
+        // Also remove channel bindings
+        conn.execute("DELETE FROM agent_channels WHERE agent_name=?1", params![name])
+            .map_err(|e| format!("Delete agent channels: {e}"))?;
+        Ok(())
+    }
+
+    // ── Agent-Channel Bindings ──────────────────────────────
+
+    /// Set channel bindings for an agent (replaces all existing).
+    pub fn set_agent_channels(&self, agent_name: &str, channels: &[String]) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| format!("Lock: {e}"))?;
+        // Delete existing bindings
+        conn.execute("DELETE FROM agent_channels WHERE agent_name=?1", params![agent_name])
+            .map_err(|e| format!("Clear channels: {e}"))?;
+        // Insert new bindings
+        for ch in channels {
+            conn.execute(
+                "INSERT INTO agent_channels (agent_name, channel_type) VALUES (?1, ?2)",
+                params![agent_name, ch],
+            ).map_err(|e| format!("Insert channel: {e}"))?;
+        }
+        Ok(())
+    }
+
+    /// Get channels for an agent.
+    pub fn get_agent_channels(&self, agent_name: &str) -> Result<Vec<String>, String> {
+        let conn = self.conn.lock().map_err(|e| format!("Lock: {e}"))?;
+        let mut stmt = conn.prepare(
+            "SELECT channel_type FROM agent_channels WHERE agent_name=?1 ORDER BY channel_type"
+        ).map_err(|e| format!("Prepare: {e}"))?;
+        
+        let channels = stmt.query_map(params![agent_name], |row| row.get::<_, String>(0))
+            .map_err(|e| format!("Query: {e}"))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(channels)
+    }
+
+    /// Get all agent-channel bindings.
+    pub fn all_agent_channels(&self) -> Result<std::collections::HashMap<String, Vec<String>>, String> {
+        let conn = self.conn.lock().map_err(|e| format!("Lock: {e}"))?;
+        let mut stmt = conn.prepare(
+            "SELECT agent_name, channel_type FROM agent_channels ORDER BY agent_name"
+        ).map_err(|e| format!("Prepare: {e}"))?;
+
+        let mut map = std::collections::HashMap::new();
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        }).map_err(|e| format!("Query: {e}"))?;
+
+        for r in rows.flatten() {
+            map.entry(r.0).or_insert_with(Vec::new).push(r.1);
+        }
+        Ok(map)
+    }
+
+    // ── Settings ──────────────────────────────
+
+    /// Get a setting value.
+    pub fn get_setting(&self, key: &str) -> Result<Option<String>, String> {
+        let conn = self.conn.lock().map_err(|e| format!("Lock: {e}"))?;
+        match conn.query_row(
+            "SELECT value FROM settings WHERE key=?1", params![key],
+            |row| row.get::<_, String>(0),
+        ) {
+            Ok(v) => Ok(Some(v)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(format!("Get setting: {e}")),
+        }
+    }
+
+    /// Set a setting value.
+    pub fn set_setting(&self, key: &str, value: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| format!("Lock: {e}"))?;
+        conn.execute(
+            "INSERT INTO settings (key, value, updated_at) VALUES (?1, ?2, datetime('now'))
+             ON CONFLICT(key) DO UPDATE SET value=?2, updated_at=datetime('now')",
+            params![key, value],
+        ).map_err(|e| format!("Set setting: {e}"))?;
+        Ok(())
+    }
+
+    /// Migrate existing agents.json data into DB.
+    pub fn migrate_from_agents_json(&self, agents: &[serde_json::Value]) -> Result<usize, String> {
+        let mut count = 0;
+        for meta in agents {
+            let name = meta["name"].as_str().unwrap_or_default();
+            if name.is_empty() { continue; }
+            let role = meta["role"].as_str().unwrap_or("assistant");
+            let description = meta["description"].as_str().unwrap_or("");
+            let provider = meta["provider"].as_str().unwrap_or("");
+            let model = meta["model"].as_str().unwrap_or("");
+            let system_prompt = meta["system_prompt"].as_str().unwrap_or("");
+            self.upsert_agent(name, role, description, provider, model, system_prompt)?;
+            count += 1;
+        }
+        Ok(count)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn temp_db() -> GatewayDb {
+        GatewayDb::open(&PathBuf::from(":memory:")).unwrap()
+    }
+
+    #[test]
+    fn test_default_providers_seeded() {
+        let db = temp_db();
+        let providers = db.list_providers("").unwrap();
+        assert!(providers.len() >= 15, "Should have at least 15 default providers, got {}", providers.len());
+        
+        let openai = providers.iter().find(|p| p.name == "openai").unwrap();
+        assert_eq!(openai.provider_type, "cloud");
+        assert_eq!(openai.label, "OpenAI");
+        assert_eq!(openai.icon, "🤖");
+        assert_eq!(openai.auth_style, "bearer");
+        assert_eq!(openai.base_url, "https://api.openai.com/v1");
+        assert!(openai.models.contains(&"gpt-4o".to_string()));
+    }
+
+    #[test]
+    fn test_provider_crud() {
+        let db = temp_db();
+        
+        // Create custom provider
+        let p = db.upsert_provider(
+            "my-local", "My Local LLM", "🏠", "local",
+            "", "http://localhost:11434/v1",
+            "/chat/completions", "/models", "none",
+            &[], &["my-model".to_string()],
+        ).unwrap();
+        assert_eq!(p.name, "my-local");
+        assert_eq!(p.label, "My Local LLM");
+        assert_eq!(p.provider_type, "local");
+        
+        // Update
+        db.update_provider_config("my-local", Some("sk-1234"), None).unwrap();
+        let updated = db.get_provider("my-local").unwrap();
+        assert_eq!(updated.api_key, "sk-1234");
+        
+        // Delete
+        db.delete_provider("my-local").unwrap();
+        assert!(db.get_provider("my-local").is_err());
+    }
+
+    #[test]
+    fn test_provider_extended_fields() {
+        let db = temp_db();
+        let openai = db.get_provider("openai").unwrap();
+        assert_eq!(openai.chat_path, "/chat/completions");
+        assert_eq!(openai.models_path, "/models");
+        assert_eq!(openai.auth_style, "bearer");
+        assert!(openai.env_keys.contains(&"OPENAI_API_KEY".to_string()));
+    }
+
+    #[test]
+    fn test_update_models_cache() {
+        let db = temp_db();
+        db.update_provider_models("openai", &[
+            "gpt-4o".to_string(),
+            "gpt-4o-mini".to_string(),
+            "o1-preview".to_string(),
+        ]).unwrap();
+        let p = db.get_provider("openai").unwrap();
+        assert_eq!(p.models.len(), 3);
+        assert!(p.models.contains(&"o1-preview".to_string()));
+    }
+
+    #[test]
+    fn test_active_provider() {
+        let db = temp_db();
+        let providers = db.list_providers("ollama").unwrap();
+        let ollama = providers.iter().find(|p| p.name == "ollama").unwrap();
+        assert!(ollama.is_active);
+        let openai = providers.iter().find(|p| p.name == "openai").unwrap();
+        assert!(!openai.is_active);
+    }
+
+    #[test]
+    fn test_agent_crud() {
+        let db = temp_db();
+        
+        // Create
+        let a = db.upsert_agent("hr-bot", "assistant", "HR support", "ollama", "llama3.2", "You are HR").unwrap();
+        assert_eq!(a.name, "hr-bot");
+        assert_eq!(a.provider, "ollama");
+        
+        // Update
+        let a2 = db.upsert_agent("hr-bot", "assistant", "HR support v2", "deepseek", "deepseek-chat", "You are HR v2").unwrap();
+        assert_eq!(a2.description, "HR support v2");
+        assert_eq!(a2.provider, "deepseek");
+        
+        // List
+        let agents = db.list_agents().unwrap();
+        assert_eq!(agents.len(), 1);
+        
+        // Delete
+        db.delete_agent("hr-bot").unwrap();
+        assert!(db.get_agent("hr-bot").is_err());
+    }
+
+    #[test]
+    fn test_agent_channels() {
+        let db = temp_db();
+        db.upsert_agent("test", "assistant", "", "", "", "").unwrap();
+        
+        // Set channels
+        db.set_agent_channels("test", &["telegram".to_string(), "zalo".to_string()]).unwrap();
+        let ch = db.get_agent_channels("test").unwrap();
+        assert_eq!(ch.len(), 2);
+        assert!(ch.contains(&"telegram".to_string()));
+        
+        // Replace channels
+        db.set_agent_channels("test", &["discord".to_string()]).unwrap();
+        let ch2 = db.get_agent_channels("test").unwrap();
+        assert_eq!(ch2, vec!["discord"]);
+        
+        // Delete agent cascades
+        db.delete_agent("test").unwrap();
+        let ch3 = db.get_agent_channels("test").unwrap();
+        assert!(ch3.is_empty());
+    }
+
+    #[test]
+    fn test_settings() {
+        let db = temp_db();
+        
+        assert!(db.get_setting("theme").unwrap().is_none());
+        
+        db.set_setting("theme", "dark").unwrap();
+        assert_eq!(db.get_setting("theme").unwrap(), Some("dark".to_string()));
+        
+        db.set_setting("theme", "light").unwrap();
+        assert_eq!(db.get_setting("theme").unwrap(), Some("light".to_string()));
+    }
+
+    #[test]
+    fn test_migrate_from_json() {
+        let db = temp_db();
+        let json_data = vec![
+            serde_json::json!({"name": "sales-bot", "role": "assistant", "provider": "openai", "model": "gpt-4o-mini"}),
+            serde_json::json!({"name": "hr-bot", "role": "researcher", "system_prompt": "You are HR"}),
+        ];
+        let count = db.migrate_from_agents_json(&json_data).unwrap();
+        assert_eq!(count, 2);
+        
+        let agents = db.list_agents().unwrap();
+        assert_eq!(agents.len(), 2);
+    }
+
+    #[test]
+    fn test_all_agent_channels() {
+        let db = temp_db();
+        db.upsert_agent("a1", "assistant", "", "", "", "").unwrap();
+        db.upsert_agent("a2", "assistant", "", "", "", "").unwrap();
+        
+        db.set_agent_channels("a1", &["telegram".to_string(), "zalo".to_string()]).unwrap();
+        db.set_agent_channels("a2", &["discord".to_string()]).unwrap();
+        
+        let all = db.all_agent_channels().unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all["a1"].len(), 2);
+        assert_eq!(all["a2"].len(), 1);
+    }
+}

@@ -1,0 +1,31 @@
+# Build
+/target
+
+# Editor
+*.swp
+*.swo
+.DS_Store
+
+# Environment & secrets
+.env
+*.log
+
+# Non-production — AI dev toolkit (local only)
+.agent/
+.gemini/
+plans/
+
+# Internal DEV files — NOT for public repo
+GEMINI.md
+GETTING_STARTED.md
+update.sh
+
+# Deploy & infra scripts — contain VPS IP, credentials
+deploy-landing.sh
+deploy*.sh
+scripts/
+!scripts/install.sh
+
+# OS
+Thumbs.db
+mission-control/

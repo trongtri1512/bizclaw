@@ -1,0 +1,160 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/bizclaw-core",
+    "crates/bizclaw-brain",
+    "crates/bizclaw-providers",
+    "crates/bizclaw-channels",
+    "crates/bizclaw-memory",
+    "crates/bizclaw-tools",
+    "crates/bizclaw-mcp",
+    "crates/bizclaw-scheduler",
+    "crates/bizclaw-knowledge",
+    "crates/bizclaw-security",
+    "crates/bizclaw-runtime",
+    "crates/bizclaw-gateway",
+    "crates/bizclaw-agent",
+    "crates/bizclaw-platform",
+    "crates/bizclaw-db",
+    "crates/bizclaw-hands",
+    "crates/bizclaw-ffi",
+    "crates/bizclaw-workflows",
+    "crates/bizclaw-skills",
+]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2024"
+authors = ["BizClaw Team"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/BizClaw/bizclaw"
+rust-version = "1.85"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+# HTTP
+reqwest = { version = "0.12", features = ["json", "cookies", "socks", "stream"] }
+# Error handling
+thiserror = "2"
+anyhow = "1"
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+# CLI
+clap = { version = "4", features = ["derive"] }
+# Async utilities
+futures = "0.3"
+async-trait = "0.1"
+tokio-stream = "0.1"
+# Crypto
+aes = "0.8"
+rsa = "0.9.6"
+sha2 = "0.10"
+hmac = "0.12"
+base64 = "0.22"
+# Database
+rusqlite = { version = "0.32", features = ["bundled"] }
+# Memory mapping
+memmap2 = "0.9"
+# Parallelism
+rayon = "1"
+# FP16
+half = "2"
+# Binary parsing
+byteorder = "1"
+# Misc
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+rand = "0.8"
+dirs = "6"
+shellexpand = "3"
+hostname = "0.4"
+whoami = "1"
+# WebSocket
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+# HTTP server
+axum = { version = "0.8", features = ["ws"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+# Email
+lettre = { version = "0.11", features = ["tokio1-native-tls", "builder"] }
+async-imap = { version = "0.11", default-features = false, features = ["runtime-tokio"] }
+native-tls = "0.2"
+mail-parser = "0.9"
+# Database abstraction
+sqlx = { version = "0.8", features = ["runtime-tokio-native-tls", "postgres", "chrono", "json", "uuid", "migrate"] }
+
+# Internal crates
+bizclaw-core = { path = "crates/bizclaw-core" }
+bizclaw-brain = { path = "crates/bizclaw-brain" }
+bizclaw-providers = { path = "crates/bizclaw-providers" }
+bizclaw-channels = { path = "crates/bizclaw-channels" }
+bizclaw-memory = { path = "crates/bizclaw-memory" }
+bizclaw-tools = { path = "crates/bizclaw-tools" }
+bizclaw-security = { path = "crates/bizclaw-security" }
+bizclaw-runtime = { path = "crates/bizclaw-runtime" }
+bizclaw-gateway = { path = "crates/bizclaw-gateway" }
+bizclaw-agent = { path = "crates/bizclaw-agent" }
+bizclaw-mcp = { path = "crates/bizclaw-mcp" }
+bizclaw-scheduler = { path = "crates/bizclaw-scheduler" }
+bizclaw-knowledge = { path = "crates/bizclaw-knowledge" }
+bizclaw-db = { path = "crates/bizclaw-db" }
+
+[package]
+name = "bizclaw"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Fast, small, and fully autonomous AI assistant infrastructure with local brain"
+default-run = "bizclaw"
+
+[dependencies]
+openssl = { version = "0.10", features = ["vendored"] }
+bizclaw-core.workspace = true
+bizclaw-brain.workspace = true
+bizclaw-providers.workspace = true
+bizclaw-channels.workspace = true
+bizclaw-memory.workspace = true
+bizclaw-tools.workspace = true
+bizclaw-security.workspace = true
+bizclaw-agent.workspace = true
+bizclaw-mcp.workspace = true
+bizclaw-scheduler.workspace = true
+bizclaw-knowledge.workspace = true
+bizclaw-gateway.workspace = true
+bizclaw-db.workspace = true
+bizclaw-platform = { path = "crates/bizclaw-platform" }
+tokio.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+tokio-stream.workspace = true
+futures.workspace = true
+reqwest.workspace = true
+shellexpand.workspace = true
+rand.workspace = true
+
+[[bin]]
+name = "bizclaw"
+path = "src/main.rs"
+
+[[bin]]
+name = "bizclaw-platform"
+path = "src/platform_main.rs"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

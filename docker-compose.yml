@@ -1,0 +1,88 @@
+# ═══════════════════════════════════════════════════════════════
+# BizClaw Platform — Docker Compose (Dev + PG Mode)
+# Usage: docker-compose up -d
+# Dashboard:  http://localhost:3001
+# PostgreSQL: localhost:5432
+# ═══════════════════════════════════════════════════════════════
+
+version: '3.8'
+
+services:
+
+  # ── PostgreSQL 16 ────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: bizclaw-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB:       bizclaw
+      POSTGRES_USER:     bizclaw
+      POSTGRES_PASSWORD: BizClaw@2026DB
+      TZ: Asia/Ho_Chi_Minh
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d:ro   # auto-run on first boot
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bizclaw"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── BizClaw Platform ─────────────────────────────────────────
+  bizclaw:
+    build: .
+    container_name: bizclaw
+    restart: unless-stopped
+    ports:
+      - "3001:3001"     # Admin dashboard
+      - "10001:10001"   # Tenant 1 gateway
+      - "10002:10002"   # Tenant 2 gateway
+      - "10003:10003"   # Tenant 3 gateway
+      - "10004:10004"   # Tenant 4 gateway
+      - "10005:10005"   # Tenant 5 gateway
+    volumes:
+      - bizclaw_data:/root/.bizclaw
+    environment:
+      - RUST_LOG=info
+      - BIZCLAW_CONFIG=/root/.bizclaw/config.toml
+      - BIZCLAW_BIND_ALL=1
+      - DATABASE_URL=postgres://bizclaw:BizClaw@2026DB@postgres:5432/bizclaw
+      - TZ=Asia/Ho_Chi_Minh
+      # Uncomment to set a persistent JWT secret:
+      # - JWT_SECRET=your-64-char-random-secret-here
+      # Uncomment to restrict CORS:
+      # - BIZCLAW_CORS_ORIGINS=https://yourdomain.com
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3001/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # ── Ollama (optional — local AI) ─────────────────────────────
+  ollama:
+    image: ollama/ollama:latest
+    container_name: bizclaw-ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    # Uncomment for GPU support:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - capabilities: [gpu]
+
+volumes:
+  pg_data:
+    driver: local
+  bizclaw_data:
+    driver: local
+  ollama_data:
+    driver: local
