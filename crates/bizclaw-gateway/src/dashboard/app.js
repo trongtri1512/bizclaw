@@ -95,30 +95,36 @@ function StatsCard({ label, value, color = 'accent', sub, icon }) {
 window.StatsCard = StatsCard;
 
 // ═══ SIDEBAR ═══
-function Sidebar({ currentPage, onNavigate, lang, onLangChange, wsStatus, agentName }) {
+// Navigation uses a global document-level click handler (set up in App)
+// that reads data-page from link elements. This avoids stale closure issues
+// with Preact+HTM event binding.
+function Sidebar({ currentPage, lang, wsStatus, agentName, theme }) {
   return html`<aside class="sidebar">
     <div class="logo">
       <span class="icon">⚡</span>
       <span class="text">BizClaw</span>
     </div>
-    <nav class="nav">
+    <nav class="nav" id="sidebar-nav">
       ${PAGES.map(p => p.sep
         ? html`<div class="nav-sep" key=${p.id}></div>`
         : html`<a key=${p.id} href="/${p.id === 'dashboard' ? '' : p.id}"
-              class=${currentPage === p.id ? 'active' : ''}
-              onClick=${(e) => { e.preventDefault(); onNavigate(p.id); }}>
+              data-page=${p.id}
+              class=${currentPage === p.id ? 'active' : ''}>
             ${p.icon} <span>${t(p.label, lang)}</span>
           </a>`
       )}
     </nav>
     <div class="sidebar-footer">
       <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
-        <button onClick=${() => onLangChange('vi')}
+        <button data-lang="vi"
           style="padding:2px 8px;font-size:11px;border-radius:4px;border:1px solid var(--border);background:${lang === 'vi' ? 'var(--accent)' : 'transparent'};color:${lang === 'vi' ? '#fff' : 'var(--text2)'};cursor:pointer">VI</button>
-        <button onClick=${() => onLangChange('en')}
+        <button data-lang="en"
           style="padding:2px 8px;font-size:11px;border-radius:4px;border:1px solid var(--border);background:${lang === 'en' ? 'var(--accent)' : 'transparent'};color:${lang === 'en' ? '#fff' : 'var(--text2)'};cursor:pointer">EN</button>
       </div>
-      <div>${wsStatus === 'connected' ? '🟢' : '🔴'} ${t(wsStatus === 'connected' ? 'status.connected' : 'status.disconnected', lang)}</div>
+      <button class="theme-toggle" data-theme-toggle="true">
+        ${theme === 'light' ? '🌙' : '☀️'} ${theme === 'light' ? 'Dark Mode' : 'Light Mode'}
+      </button>
+      <div id="ws-status-indicator">${wsStatus === 'connected' ? '🟢' : '🔴'} ${t(wsStatus === 'connected' ? 'status.connected' : 'status.disconnected', lang)}</div>
       <div style="margin-top:4px">${agentName}</div>
     </div>
   </aside>`;
@@ -420,6 +426,7 @@ function ChatPage({ config, lang }) {
 function DashboardPage({ config, lang }) {
   const [clock, setClock] = useState('--:--:--');
   const [dateStr, setDateStr] = useState('');
+  const [sysInfo, setSysInfo] = useState({});
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -430,9 +437,29 @@ function DashboardPage({ config, lang }) {
     return () => clearInterval(timer);
   }, [lang]);
 
-  const provider = config?.default_provider || '—';
-  const model = config?.providers?.[provider]?.model || '—';
-  const version = config?.version || '—';
+  // Fetch system info from /api/v1/info
+  useEffect(() => {
+    (async () => {
+      try {
+        const r = await authFetch('/api/v1/info');
+        const d = await r.json();
+        setSysInfo(d);
+      } catch (e) { console.warn('Info fetch:', e); }
+    })();
+  }, []);
+
+  const provider = sysInfo.default_provider || config?.default_provider || '—';
+  const model = config?.default_model || sysInfo.default_model || '—';
+  const version = sysInfo.version || config?.version || '—';
+  
+  // Format uptime from seconds
+  const uptimeSecs = sysInfo.uptime_secs || 0;
+  const uptimeStr = uptimeSecs > 0
+    ? (uptimeSecs >= 3600 ? Math.floor(uptimeSecs/3600) + 'h ' : '') + Math.floor((uptimeSecs%3600)/60) + 'm ' + (uptimeSecs%60) + 's'
+    : '—';
+  
+  // Parse platform "macos/aarch64" → os + arch
+  const [osName, archName] = (sysInfo.platform || '').split('/');
 
   return html`<div>
     <div class="page-header"><div>
@@ -442,7 +469,7 @@ function DashboardPage({ config, lang }) {
 
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:16px">
       <${StatsCard} label=${t('dash.clock', lang)} value=${clock} color="accent" sub=${dateStr} icon="⏰" />
-      <${StatsCard} label=${t('dash.uptime', lang)} value=${config?.uptime || '—'} color="green" sub=${t('dash.status', lang)} />
+      <${StatsCard} label=${t('dash.uptime', lang)} value=${uptimeStr} color="green" sub=${t('dash.status', lang)} />
       <${StatsCard} label=${t('dash.provider', lang)} value=${provider} color="blue" sub=${model} />
       <${StatsCard} label=${t('dash.version', lang)} value=${version} color="accent" />
     </div>
@@ -454,10 +481,10 @@ function DashboardPage({ config, lang }) {
           <span class="badge badge-green">● ${t('dash.online', lang)}</span>
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:12px">
-          <div><span style="color:var(--text2)">${t('sys.os', lang)}</span> ${config?.system?.os || '—'}</div>
-          <div><span style="color:var(--text2)">${t('sys.arch', lang)}</span> ${config?.system?.arch || '—'}</div>
-          <div><span style="color:var(--text2)">SIMD:</span> <span style="color:var(--accent2)">${config?.system?.simd || '—'}</span></div>
-          <div><span style="color:var(--text2)">${t('sys.memory', lang)}</span> ${config?.system?.memory || '—'}</div>
+          <div><span style="color:var(--text2)">${t('sys.os', lang)}</span> ${osName || '—'}</div>
+          <div><span style="color:var(--text2)">${t('sys.arch', lang)}</span> ${archName || '—'}</div>
+          <div><span style="color:var(--text2)">SIMD:</span> <span style="color:var(--accent2)">${archName === 'aarch64' ? 'NEON' : archName === 'x86_64' ? 'AVX2' : '—'}</span></div>
+          <div><span style="color:var(--text2)">${t('sys.memory', lang)}</span> ${sysInfo.memory || '—'}</div>
         </div>
       </div>
       <div class="card">
@@ -2602,6 +2629,12 @@ export function App() {
   const [toast, setToast] = useState(null);
   const [paired, setPaired] = useState(false);
   const [checkingPairing, setCheckingPairing] = useState(true);
+  const [theme, setTheme] = useState(localStorage.getItem('bizclaw_theme') || 'dark');
+
+  // Apply theme to <html> element
+  useEffect(() => {
+    document.documentElement.classList.toggle('light', theme === 'light');
+  }, [theme]);
   const wsRef = useRef(null);
 
   // Check pairing
@@ -2640,49 +2673,72 @@ export function App() {
     })();
   }, [paired]);
 
-  // WebSocket
+  // WebSocket — connect after a short delay to allow pairing to resolve
+  // Using [] dependency to run once, with internal retry logic
   useEffect(() => {
-    if (!paired) return;
+    let cancelled = false;
     let reconnectAttempts = 0;
     let pingTimer = null;
+    let reconnectTimer = null;
 
     function connect() {
+      if (cancelled) return;
       const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
       const codeParam = pairingCode ? '?code=' + encodeURIComponent(pairingCode) : '';
-      const socket = new WebSocket(proto + '//' + location.host + '/ws' + codeParam);
+      const url = proto + '//' + location.host + '/ws' + codeParam;
+      
+      try {
+        const socket = new WebSocket(url);
 
-      socket.onopen = () => {
-        reconnectAttempts = 0;
-        setWsStatus('connected');
-        pingTimer = setInterval(() => {
-          if (socket.readyState === 1) socket.send(JSON.stringify({ type: 'ping' }));
-        }, 25000);
-      };
-      socket.onclose = () => {
-        setWsStatus('disconnected');
-        if (pingTimer) clearInterval(pingTimer);
-        reconnectAttempts++;
-        const delay = Math.min(1000 * Math.pow(1.5, reconnectAttempts), 30000);
-        setTimeout(connect, delay);
-      };
-      socket.onerror = (e) => console.error('WS error:', e);
-      socket.onmessage = (e) => {
-        try {
-          const msg = JSON.parse(e.data);
-          // Handle WS messages (for chat)
-          window.dispatchEvent(new CustomEvent('ws-message', { detail: msg }));
-        } catch (err) { console.error('WS parse:', err); }
-      };
-      wsRef.current = socket;
-      window._ws = socket;
+        socket.onopen = () => {
+          if (cancelled) { socket.close(); return; }
+          reconnectAttempts = 0;
+          setWsStatus('connected');
+          const el = document.getElementById('ws-status-indicator');
+          if (el) { const _l = localStorage.getItem('bizclaw_lang') || 'vi'; el.textContent = '🟢 ' + t('status.connected', _l); }
+          pingTimer = setInterval(() => {
+            if (socket.readyState === 1) socket.send(JSON.stringify({ type: 'ping' }));
+          }, 25000);
+        };
+        socket.onclose = (ev) => {
+          setWsStatus('disconnected');
+          const el = document.getElementById('ws-status-indicator');
+          if (el) { const _l = localStorage.getItem('bizclaw_lang') || 'vi'; el.textContent = '🔴 ' + t('status.disconnected', _l); }
+          if (pingTimer) { clearInterval(pingTimer); pingTimer = null; }
+          if (!cancelled) {
+            reconnectAttempts++;
+            const delay = Math.min(1000 * Math.pow(1.5, reconnectAttempts), 30000);
+            reconnectTimer = setTimeout(connect, delay);
+          }
+        };
+        socket.onerror = () => {};
+        socket.onmessage = (e) => {
+          try {
+            const msg = JSON.parse(e.data);
+            window.dispatchEvent(new CustomEvent('ws-message', { detail: msg }));
+          } catch (err) {}
+        };
+        wsRef.current = socket;
+        window._ws = socket;
+      } catch (e) {
+        if (!cancelled) {
+          reconnectTimer = setTimeout(connect, 2000);
+        }
+      }
     }
-    connect();
+    // Small delay to let initial render + pairing resolve
+    reconnectTimer = setTimeout(connect, 500);
 
     return () => {
-      if (wsRef.current) wsRef.current.close();
+      cancelled = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
       if (pingTimer) clearInterval(pingTimer);
+      if (wsRef.current) {
+        wsRef.current.onclose = null;
+        wsRef.current.close();
+      }
     };
-  }, [paired]);
+  }, []);
 
   // History API: handle browser back/forward
   useEffect(() => {
@@ -2693,7 +2749,6 @@ export function App() {
     window.addEventListener('popstate', handlePop);
     return () => window.removeEventListener('popstate', handlePop);
   }, []);
-
 
 
   const changeLang = useCallback((l) => {
@@ -2708,81 +2763,68 @@ export function App() {
   }, []);
   window.showToast = showToast;
 
-  if (checkingPairing) return html`<div style="display:flex;align-items:center;justify-content:center;height:100vh;background:var(--bg);color:var(--text2)">⏳ Loading...</div>`;
-  if (!paired) return html`<${PairingGate} onSuccess=${() => setPaired(true)} />`;
-
-  // Navigate: use manual render() to swap page content.
-  // Preact+HTM's vdom diffing has a bug where <main> content is not updated
-  // even when state changes. This nuclear fix bypasses vdom entirely.
-  const mainRef = useRef(null);
-  
-  const doRenderPage = useCallback((pageId) => {
-    if (!mainRef.current) return;
-    const cfg = window.__bizclaw_config || config;
-    const ln = window.__bizclaw_lang || lang;
-    let pageVNode;
-    switch (pageId) {
-      case 'dashboard': pageVNode = html`<${DashboardPage} config=${cfg} lang=${ln} />`; break;
-      case 'chat': pageVNode = html`<${ChatPage} config=${cfg} lang=${ln} />`; break;
-      case 'hands': pageVNode = html`<${HandsPage} lang=${ln} />`; break;
-      case 'settings': pageVNode = html`<${SettingsPage} config=${cfg} lang=${ln} />`; break;
-      case 'providers': pageVNode = html`<${ProvidersPage} config=${cfg} lang=${ln} />`; break;
-      case 'channels': pageVNode = html`<${ChannelsPage} lang=${ln} />`; break;
-      case 'tools': pageVNode = html`<${ToolsPage} lang=${ln} />`; break;
-      case 'agents': pageVNode = html`<${AgentsPage} config=${cfg} lang=${ln} />`; break;
-      case 'knowledge': pageVNode = html`<${KnowledgePage} lang=${ln} />`; break;
-      case 'mcp': pageVNode = html`<${McpPage} lang=${ln} />`; break;
-      case 'orchestration': pageVNode = html`<${OrchestrationPage} lang=${ln} />`; break;
-      case 'gallery': pageVNode = html`<${GalleryPage} lang=${ln} />`; break;
-      case 'brain': pageVNode = html`<${SettingsPage} config=${cfg} lang=${ln} />`; break;
-      case 'configfile': pageVNode = html`<${ConfigFilePage} lang=${ln} />`; break;
-      case 'scheduler': pageVNode = html`<${SchedulerPage} lang=${ln} />`; break;
-      case 'traces': pageVNode = html`<${TracesPage} lang=${ln} />`; break;
-      case 'cost': pageVNode = html`<${CostPage} lang=${ln} />`; break;
-      case 'activity': pageVNode = html`<${ActivityPage} lang=${ln} />`; break;
-      case 'workflows': pageVNode = html`<${WorkflowsPage} lang=${ln} />`; break;
-      case 'skills': pageVNode = html`<${SkillsPage} lang=${ln} />`; break;
-      case 'wiki': pageVNode = html`<${WikiPage} lang=${ln} />`; break;
-      default: pageVNode = html`<div class="card" style="padding:40px;text-align:center"><div style="font-size:48px;margin-bottom:16px">📄</div><h2>${pageId}</h2></div>`; break;
-    }
-    // Manual render into <main> — bypasses parent vdom diffing entirely
-    render(pageVNode, mainRef.current);
-  }, [config, lang]);
-
-  // Render initial page when mainRef is available
-  useEffect(() => {
-    if (mainRef.current) doRenderPage(currentPage);
-  }, [currentPage, doRenderPage]);
-
-  // Keep globals in sync for doRenderPage closure
-  window.__bizclaw_config = config;
-  window.__bizclaw_lang = lang;
-
-  function navigate(pageId) {
+  // Navigate function (defined before early returns to avoid hooks violation)
+  const navigate = useCallback((pageId) => {
     const path = '/' + (pageId === 'dashboard' ? '' : pageId);
     if (location.pathname !== path) {
       history.pushState({}, '', path);
     }
     setCurrentPage(pageId);
-    // Also trigger immediate render (don't wait for state update)
-    setTimeout(() => doRenderPage(pageId), 0);
-  }
+  }, []);
 
-  // Global navigate — must be set AFTER navigate is created
+  // Global refs — always point to latest function
+  // Must be set on every render (not in useEffect) so they're always fresh
   window._navigate = navigate;
+  window._changeLang = changeLang;
+  window._toggleTheme = () => {
+    const next = theme === 'dark' ? 'light' : 'dark';
+    setTheme(next);
+    localStorage.setItem('bizclaw_theme', next);
+  };
+
+  // One-time global click handler for sidebar nav links, lang buttons, and theme toggle
+  useEffect(() => {
+    const handler = (e) => {
+      const link = e.target.closest('a[data-page]');
+      if (link) {
+        e.preventDefault();
+        e.stopPropagation();
+        const pageId = link.getAttribute('data-page');
+        if (pageId && window._navigate) window._navigate(pageId);
+        return;
+      }
+      const langBtn = e.target.closest('button[data-lang]');
+      if (langBtn) {
+        const l = langBtn.getAttribute('data-lang');
+        if (l && window._changeLang) window._changeLang(l);
+        return;
+      }
+      const themeBtn = e.target.closest('[data-theme-toggle]');
+      if (themeBtn) {
+        if (window._toggleTheme) window._toggleTheme();
+        return;
+      }
+    };
+    document.addEventListener('click', handler, true);
+    return () => document.removeEventListener('click', handler, true);
+  }, []);
+
+  // Early returns AFTER all hooks (Rules of Hooks: hooks must be called in same order every render)
+  if (checkingPairing) return html`<div style="display:flex;align-items:center;justify-content:center;height:100vh;background:var(--bg);color:var(--text2)">⏳ Loading...</div>`;
+  if (!paired) return html`<${PairingGate} onSuccess=${() => setPaired(true)} />`;
 
   return html`
     <${AppContext.Provider} value=${{ config, lang, t: (k) => t(k, lang), showToast, navigate, wsStatus }}>
       <div class="app">
         <${Sidebar}
           currentPage=${currentPage}
-          onNavigate=${navigate}
           lang=${lang}
-          onLangChange=${changeLang}
           wsStatus=${wsStatus}
           agentName=${config?.agent_name || 'BizClaw Agent'}
+          theme=${theme}
         />
-        <main class="main" ref=${mainRef}>
+        <main class="main">
+          <${PageRouter} key=${currentPage} page=${currentPage} config=${config} lang=${lang} />
         </main>
       </div>
       <${Toast} ...${toast || {}} />

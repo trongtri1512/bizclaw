@@ -77,6 +77,14 @@ pub fn dashboard_static_files() -> HashMap<&'static str, (&'static str, &'static
             "application/javascript; charset=utf-8",
         ),
     );
+    // All-in-one standalone: preact + hooks + htm in single file (no dual-instance)
+    files.insert(
+        "/static/dashboard/vendor/standalone.mjs",
+        (
+            include_str!("dashboard/vendor/standalone.mjs"),
+            "application/javascript; charset=utf-8",
+        ),
+    );
 
     files
 }

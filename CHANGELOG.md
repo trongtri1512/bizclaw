@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.3.1] — 2026-03-06
+
+### Fixed
+- **CRITICAL**: Preact dual-instance hazard — navigation clicks now work on ALL pages
+  - Root cause: `hooks.mjs` imported `options` from separate `preact.mjs` module, creating two Preact instances
+  - State setters (`useState`) registered with instance B while `render()` used instance A → state changes never triggered re-renders
+  - Fix: Replaced 3 separate vendor files with `htm/preact/standalone.module.js` (single file, zero external imports)
+- **Dashboard data**: Uptime, Version, OS, Arch now display real data from `/api/v1/info` (was showing "—" placeholders)
+- **Skills Market**: Now loads 10 skills from API instead of showing "Total Skills: 0"
+- **Settings page**: No longer stuck on "Loading..." forever (8s safety timeout + proper error handling)
+- **Light/Dark theme**: Theme toggle works reliably (state updates propagate correctly with single Preact instance)
+
+### Changed
+- Version bump: 0.3.0 → 0.3.1
+- Vendor bundle: 3 files (preact.mjs + hooks.mjs + htm.mjs) → 1 file (standalone.mjs, 13KB)
+- DashboardPage: fetches `/api/v1/info` on mount for system info (uptime_secs, version, platform)
+- `dashboard.rs`: embedded `standalone.mjs` in static file registry
+
+### Technical Details
+- All 20+ dashboard pages now navigate correctly via sidebar clicks
+- WebSocket: 🟢 Connected status maintained across page transitions
+- Language toggle (VI/EN) and theme toggle (Light/Dark) work on all pages
+
 ## [0.3.0] — 2026-03-05
 
 ### Added

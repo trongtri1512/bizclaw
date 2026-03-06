@@ -277,7 +277,7 @@ args = ["-y", "@modelcontextprotocol/server-github"]
 | **Lines of Code** | ~48,000 |
 | **Tests** | 342 passing |
 | **Binary Size** | bizclaw 12MB |
-| **Last Updated** | 2026-03-05 |
+| **Last Updated** | 2026-03-06 |
 
 ---
 
@@ -329,4 +329,4 @@ MIT License — see [LICENSE](LICENSE) for details.
 
 ---
 
-**BizClaw** v0.3.0 — *AI riêng, chạy mọi nơi. / Your own AI, runs everywhere.*
+**BizClaw** v0.3.1 — *AI riêng, chạy mọi nơi. / Your own AI, runs everywhere.*

@@ -137,3 +137,56 @@ tr:hover td{background:rgba(255,255,255,.02)}
 
 /* Responsive */
 @media(max-width:768px){.app{grid-template-columns:1fr}.sidebar{display:none}.main{padding:16px}.form-row{grid-template-columns:1fr}.chat-layout{grid-template-columns:1fr}.chat-sidebar{display:none}}
+
+/* ═══ LIGHT THEME ═══ */
+html.light {
+  --bg: #f0f2f5;
+  --bg2: #e8ebf0;
+  --surface: #ffffff;
+  --surface2: #f5f6f8;
+  --border: #dce0e8;
+  --border-hover: #c0c6d4;
+  --text: #1a1d26;
+  --text2: #6b7280;
+  --accent: #5b5bd6;
+  --accent2: #6e6ede;
+  --accent-glow: rgba(91, 91, 214, 0.08);
+  --green: #059669;
+  --red: #dc2626;
+  --orange: #d97706;
+  --blue: #2563eb;
+  --cyan: #0891b2;
+  --pink: #db2777;
+  --grad1: linear-gradient(135deg, #5b5bd6, #7c5ce7);
+}
+html.light body {
+  background: var(--bg);
+  color: var(--text);
+}
+html.light ::-webkit-scrollbar-track { background: var(--bg); }
+html.light ::-webkit-scrollbar-thumb { background: var(--border-hover); }
+html.light .sidebar { box-shadow: 2px 0 12px rgba(0,0,0,.04); }
+html.light .logo .text { background: var(--grad1); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+html.light .nav a { color: var(--text2); }
+html.light .nav a:hover { background: var(--surface2); color: var(--text); }
+html.light .nav a.active { background: var(--accent-glow); color: var(--accent); font-weight: 600; }
+html.light .card { box-shadow: 0 1px 3px rgba(0,0,0,.06), 0 1px 2px rgba(0,0,0,.04); border-color: var(--border); }
+html.light .card:hover { box-shadow: 0 4px 12px rgba(0,0,0,.08); border-color: var(--border-hover); }
+html.light .toast { box-shadow: 0 8px 32px rgba(0,0,0,.12); }
+html.light .msg-bot { background: var(--surface2); border-color: var(--border); color: var(--text); }
+html.light .msg-agent { background: var(--surface2); border-color: var(--border); color: var(--text); }
+html.light .chat-main { background: var(--bg); }
+html.light .btn-primary { box-shadow: 0 2px 8px rgba(91,91,214,.25); }
+html.light .btn-primary:hover { box-shadow: 0 4px 16px rgba(91,91,214,.35); }
+html.light tr:hover td { background: rgba(0,0,0,.02); }
+html.light .ch-card { box-shadow: 0 1px 3px rgba(0,0,0,.06); }
+
+/* Theme toggle button */
+.theme-toggle {
+  display: flex; align-items: center; gap: 6px; cursor: pointer;
+  padding: 4px 10px; border-radius: 6px; border: 1px solid var(--border);
+  background: var(--surface2); color: var(--text2); font-size: 11px;
+  transition: all .2s; margin-bottom: 6px;
+}
+.theme-toggle:hover { border-color: var(--accent); color: var(--accent2); }
+
