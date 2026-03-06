@@ -14,6 +14,7 @@
 [![Rust](https://img.shields.io/badge/Rust-100%25-orange?logo=rust)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Tests](https://img.shields.io/badge/tests-342%20passing-brightgreen)]()
+[![Version](https://img.shields.io/badge/version-v0.3.1-purple)]()
 [![Website](https://img.shields.io/badge/🌐_Website-bizclaw.vn-blue)](https://bizclaw.vn)
 [![Facebook](https://img.shields.io/badge/📘_Fanpage-bizclaw.vn-1877F2?logo=facebook)](https://www.facebook.com/bizclaw.vn)
 
@@ -73,16 +74,99 @@ curl -sSL https://bizclaw.vn/install.sh | sudo bash
 | Hạng mục | Chi tiết |
 |----------|----------|
 | **🔌 16 Providers** | OpenAI, Anthropic, Gemini, DeepSeek, Groq, OpenRouter, Together, MiniMax, xAI (Grok), Mistral, BytePlus ModelArk, Ollama, llama.cpp, Brain Engine, CLIProxy, vLLM |
-| **💬 9 Channels** | CLI, Telegram, Discord, Email (IMAP/SMTP), Webhook, WhatsApp, Zalo (Personal + Official) |
+| **💬 9 Channels** | CLI, Telegram, Discord, Email (IMAP/SMTP), Webhook, WhatsApp, Zalo (Personal + Official Account) |
 | **🛠️ 13 Tools** | Shell, File, Edit File, Glob, Grep, Web Search, HTTP, Config Manager, Execute Code (9 ngôn ngữ), Plan, Group Summarizer, Calendar, Doc Reader |
 | **🔗 MCP** | Model Context Protocol — kết nối MCP servers bên ngoài, mở rộng tools không giới hạn |
 | **🧠 Brain Engine** | GGUF inference offline: mmap, quantization, Flash Attention, SIMD (ARM NEON, x86 AVX2) |
-| **🤖 51 Agent Templates** | 13 danh mục nghiệp vụ HR, Sales, Finance, Marketing... cài 1 click |
+| **🤖 Multi-Agent** | Tạo nhiều agent với vai trò khác nhau, gán vào kênh. Orchestrator quản lý N agents |
 | **📚 Knowledge RAG** | Hybrid search (FTS5 + Vector cosine similarity). Upload tài liệu → AI tự trả lời |
-| **⏰ Scheduler** | Cron, interval, one-time tasks. Agent tự chạy background, gửi kết quả qua Telegram/Email/Webhook |
-| **🔀 Workflow Rules** | Tự động hóa: 6 loại trigger → 4 loại action. Visual builder trong dashboard |
-| **🌐 Web Dashboard** | 20+ trang UI (VI/EN), WebSocket real-time, Full CRUD |
+| **🖐️ Autonomous Hands** | Agent chạy background 24/7 — Research, Analytics, Content, Monitoring, Security. Tự retry, tự report |
+| **🔄 Workflows** | Tạo workflow multi-step (Sequential, FanOut, Collect, Conditional, Loop, Transform). Chạy pipeline AI tự động |
+| **⏰ Scheduler** | Cron, interval, one-time tasks. Agent tự chạy background, gửi kết quả qua Telegram/Zalo/Email/Webhook |
+| **🎨 51 Agent Templates** | Gallery 13 danh mục nghiệp vụ: HR, Sales, Finance, Marketing, Legal, IT... cài 1 click |
+| **🌐 Web Dashboard** | 20+ trang UI (VI/EN), WebSocket real-time, Full CRUD, Dark/Light mode |
 | **🔒 Bảo mật** | AES-256, Command allowlist, Runtime sandbox, HMAC-SHA256, rate limiting |
+
+---
+
+## 🖐️ Autonomous Hands — Nhân viên AI ca đêm
+
+> Agent tự chạy, tự retry, tự báo cáo qua Telegram/Zalo/Email — không cần ai hỏi!
+
+| Hand | Nhiệm vụ | Phases |
+|------|-----------|--------|
+| 🔍 **Research Hand** | Thu thập thông tin, phân tích, tạo báo cáo | Gather → Analyze → Report |
+| 📊 **Analytics Hand** | Thống kê, xử lý trends, report hàng ngày | Collect → Process → Report |
+| ✍️ **Content Hand** | Sáng tạo nội dung, self-review, kiểm duyệt | Ideate → Create → Review |
+| 🛡️ **Monitor Hand** | Giám sát hệ thống, cảnh báo anomaly | Check → Alert |
+| 🔄 **Sync Hand** | Đồng bộ dữ liệu giữa các hệ thống | Fetch → Reconcile → Push |
+| 📣 **Outreach Hand** | Soạn tin outreach, review, gửi đa kênh | Prepare → Review → Send |
+| 🔒 **Security Hand** | Quét bảo mật, phân tích lỗ hổng | Scan → Analyze → Report |
+
+```
+  🕐 Cron: 0 */6 * * *  →  🤚 Hand chạy tự động
+                                │
+                    ┌───────────┼───────────┐
+                    ▼           ▼           ▼
+              Phase 1       Phase 2     Phase 3
+              GATHER        ANALYZE     REPORT
+                    │           │           │
+                    └───────────┼───────────┘
+                                ▼
+                    📡 Notify → Telegram / Zalo / Email
+```
+
+---
+
+## 🔄 Workflows — Pipeline AI Tự Động
+
+> Kéo thả workflow multi-step, mỗi step gán 1 agent role. Output step trước → Input step sau.
+
+**6 loại Step:**
+
+| Type | Icon | Mô tả |
+|------|------|--------|
+| **Sequential** | ➡️ | Steps chạy tuần tự |
+| **FanOut** | 🔀 | Multiple steps chạy song song |
+| **Collect** | 📥 | Gom kết quả (All/Best/Vote/Merge) |
+| **Conditional** | 🔀 | If/else branching |
+| **Loop** | 🔁 | Lặp lại đến khi đạt điều kiện |
+| **Transform** | ✨ | Biến đổi template |
+
+**Ví dụ Workflow "Content Pipeline":**
+```
+  Input: "Viết blog về AI"
+    │
+    ├─ Step 1: Draft (Writer)     → Viết bản nháp
+    ├─ Step 2: Review (Editor)    → Chỉnh sửa, góp ý
+    └─ Step 3: Polish (Proofreader) → Hoàn thiện, kiểm lỗi
+    │
+    ▼
+  Output: Bài viết hoàn chỉnh
+```
+
+**6 Template mẫu có sẵn:** Content Pipeline, Expert Consensus, Quality Gate, Research Pipeline, Translation Pipeline, Code Review Pipeline.
+
+---
+
+## 🤖 Multi-Agent System
+
+> Tạo đội ngũ agent với vai trò khác nhau — mỗi agent có provider/model/prompt riêng.
+
+```
+  ┌─────────────────── Orchestrator ───────────────────┐
+  │                                                     │
+  │  🧑‍💼 Agent "Sales"     │ Ollama/qwen3    │ Zalo    │
+  │  📊 Agent "Analytics"  │ DeepSeek/chat   │ Email   │
+  │  ✍️ Agent "Content"    │ Gemini/flash    │ Telegram│
+  │  ⚖️ Agent "Legal"      │ Claude          │ Web     │
+  │                                                     │
+  └─────────────────────────────────────────────────────┘
+```
+
+- **Gán Agent ↔ Channel**: Mỗi agent gán vào 1+ kênh (Telegram, Zalo, Discord, Webhook, Web)
+- **Provider riêng**: Mỗi agent chọn provider/model tối ưu cho vai trò
+- **Group Chat**: Nhiều agent cộng tác giải quyết 1 vấn đề
 
 ---
 
@@ -146,19 +230,6 @@ ollama pull llama3.2       # 3.8GB — phổ biến nhất
 
 ---
 
-## 👥 Group Chat — Đội ngũ Agent cộng tác
-
-```
-Bạn: "Chuẩn bị pitch cho nhà đầu tư Series A"
-  │
-  ├── 🧑‍💼 Agent "Chiến lược" (Claude)  → Phân tích thị trường, USP
-  ├── 📊 Agent "Tài chính" (DeepSeek)  → Unit economics, projections
-  ├── 📣 Agent "Marketing" (Gemini)    → Brand story, go-to-market
-  └── ⚖️ Agent "Pháp lý" (Groq)       → Term sheet, cap table
-```
-
----
-
 ## 📱 Android Agent — Không chỉ chat, mà ĐIỀU KHIỂN
 
 <p align="center">
@@ -200,28 +271,60 @@ args = ["-y", "@modelcontextprotocol/server-github"]
 
 ---
 
+## 🌐 Web Dashboard — 20+ Trang UI
+
+> Dashboard Preact/HTM build-less, WebSocket real-time, hỗ trợ VI/EN, Dark/Light mode.
+
+| Trang | Chức năng |
+|-------|-----------|
+| 📊 **Dashboard** | Tổng quan hệ thống: clock, uptime, provider, SIMD, quick actions |
+| 💬 **WebChat** | Chat trực tiếp với AI, markdown, code highlighting, streaming |
+| 🤖 **AI Agent** | CRUD multi-agent, gán provider/model/channel cho từng agent |
+| 📚 **Knowledge** | Upload tài liệu, quản lý RAG, xoá document |
+| 📡 **Channels** | Kết nối Telegram, Zalo, Discord, Webhook — trạng thái real-time |
+| ⚙️ **Settings** | Cấu hình agent, identity, safety rules |
+| 🔌 **Providers** | Kiểm tra 16 providers, trạng thái kết nối, models available |
+| 🛠️ **Tools** | 13 native tools + MCP tools — enable/disable từng tool |
+| 🔗 **MCP Servers** | Quản lý MCP server connections |
+| 🖐️ **Autonomous Hands** | Tạo/sửa/xoá Hands, monitor runs, cost tracking |
+| 🔄 **Workflows** | Tạo/sửa/chạy workflow multi-step, 6 template có sẵn |
+| 🎯 **Skills Market** | Browse 10+ skills, install/uninstall |
+| 🎨 **Gallery** | 51 agent templates theo 13 ngành |
+| ⏰ **Scheduler** | Lên lịch task, cron/interval, retry config |
+| 📈 **LLM Traces** | Xem lịch sử request/response AI |
+| 💰 **Cost Tracking** | Theo dõi chi phí API theo agent |
+| ⚡ **Activity Feed** | Realtime feed: messages, events, errors |
+| 🔀 **Orchestration** | Delegate task giữa agents, pipeline view |
+| 📖 **Wiki & Guide** | Hướng dẫn sử dụng tích hợp trong dashboard |
+| 📁 **Config File** | Xem/sửa `config.toml` trực tiếp |
+
+---
+
 ## 🏗️ Kiến trúc
 
 ```
-┌──────────────────────────────────────────────────┐
-│         bizclaw (Gateway + Dashboard)             │
-│  ┌────────────────────────────────────────┐       │
-│  │ Axum HTTP + WebSocket + Dashboard UI   │       │
-│  │ SQLite gateway.db (embedded)           │       │
-│  └────────────────┬───────────────────────┘       │
-│    ┌──────────────┼──────────────┐                │
-│    ▼              ▼              ▼                │
-│  bizclaw-agent  bizclaw-agent  bizclaw-agent      │
-│  (Orchestrator manages N agents)                  │
-│    ┌──────────────┼──────────────┐                │
-│    ▼              ▼              ▼                │
-│ 16 Providers   9 Channels    13 Tools + MCP       │
-│    ▼              ▼              ▼                │
-│ Memory         Security      Knowledge            │
-│  (SQLite+FTS5) (Allowlist)   (RAG+FTS5)           │
-│    ▼                                              │
-│ Brain Engine (GGUF+SIMD) — offline inference      │
-└──────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────┐
+│          bizclaw (Gateway + Dashboard)                │
+│  ┌────────────────────────────────────────────┐       │
+│  │ Axum HTTP + WebSocket + Dashboard UI (20+) │       │
+│  │ SQLite gateway.db (embedded)               │       │
+│  └────────────────────┬───────────────────────┘       │
+│    ┌──────────────────┼──────────────────┐            │
+│    ▼                  ▼                  ▼            │
+│  bizclaw-agent      bizclaw-agent      bizclaw-agent  │
+│  (Orchestrator manages N agents)                      │
+│    ┌──────────────────┼──────────────────┐            │
+│    ▼                  ▼                  ▼            │
+│  16 Providers      9 Channels       13 Tools + MCP    │
+│    ▼                  ▼                  ▼            │
+│  Memory            Hands             Knowledge        │
+│  (SQLite+FTS5)    (Autonomous)      (RAG+Vector)      │
+│    ▼                  ▼                  ▼            │
+│  Workflows         Scheduler         Security         │
+│  (6 step types)   (Cron+Retry)      (AES+Sandbox)     │
+│    ▼                                                  │
+│  Brain Engine (GGUF+SIMD) — offline inference         │
+└──────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -233,20 +336,18 @@ args = ["-y", "@modelcontextprotocol/server-github"]
 | `bizclaw-core` | Traits, types, config, errors | ✅ |
 | `bizclaw-brain` | GGUF inference + SIMD | ✅ |
 | `bizclaw-providers` | 16 LLM providers | ✅ |
-| `bizclaw-channels` | 9 channel types | ✅ |
+| `bizclaw-channels` | 9 channel types (incl. Zalo OA) | ✅ |
 | `bizclaw-memory` | SQLite + FTS5, Brain workspace | ✅ |
 | `bizclaw-tools` | 13 native tools + MCP bridge | ✅ |
 | `bizclaw-mcp` | MCP client (JSON-RPC 2.0) | ✅ |
-| `bizclaw-security` | AES-256, Sandbox | ✅ |
+| `bizclaw-security` | AES-256, Sandbox, Allowlists | ✅ |
 | `bizclaw-agent` | Think-Act-Observe loop | ✅ |
-| `bizclaw-gateway` | HTTP + WS + Dashboard | ✅ |
-| `bizclaw-knowledge` | Knowledge RAG | ✅ |
-| `bizclaw-scheduler` | Scheduled tasks | ✅ |
+| `bizclaw-gateway` | HTTP + WS + Dashboard (20+ pages) | ✅ |
+| `bizclaw-knowledge` | Knowledge RAG (FTS5 + Vector) | ✅ |
+| `bizclaw-scheduler` | Scheduled tasks + Retry + Notifications | ✅ |
 | `bizclaw-runtime` | Agent runtime lifecycle | ✅ |
-| `bizclaw-platform` | Multi-tenant admin server | ✅ |
-| `bizclaw-db` | PostgreSQL abstraction (cloud) | ✅ |
-| `bizclaw-hands` | Autonomous device tools | ✅ |
-| `bizclaw-workflows` | Workflow orchestration | ✅ |
+| `bizclaw-hands` | Autonomous Hands (7 types) | ✅ |
+| `bizclaw-workflows` | Workflow orchestration (6 step types) | ✅ |
 | `bizclaw-skills` | Agent skill modules | ✅ |
 | `bizclaw-ffi` | Android FFI layer | ✅ |
 
@@ -273,10 +374,12 @@ args = ["-y", "@modelcontextprotocol/server-github"]
 | Metric | Value |
 |--------|-------|
 | **Language** | 100% Rust + Kotlin (Android) |
-| **Crates** | 19 |
-| **Lines of Code** | ~48,000 |
+| **Crates** | 17 |
+| **Lines of Code** | ~50,000+ |
 | **Tests** | 342 passing |
-| **Binary Size** | bizclaw 12MB |
+| **Binary Size** | bizclaw ~12MB |
+| **Dashboard Pages** | 20+ |
+| **Agent Templates** | 51 |
 | **Last Updated** | 2026-03-06 |
 
 ---
@@ -300,13 +403,16 @@ cd bizclaw && cargo build --release
 ### Key Features
 
 - **16 AI Providers** — OpenAI, Anthropic, Gemini, DeepSeek, Groq, Ollama, and more
-- **9 Channels** — CLI, Telegram, Discord, Email, Webhook, WhatsApp, Zalo
+- **9 Channels** — CLI, Telegram, Discord, Email, Webhook, WhatsApp, Zalo (Personal + OA)
 - **13 Tools** + MCP support for unlimited extensions
+- **Multi-Agent** — Create teams of agents with different roles, assign to channels
+- **Autonomous Hands** — Background agents that run 24/7: Research, Content, Analytics, Monitoring, Security
+- **Workflows** — Multi-step AI pipelines: Sequential, FanOut, Collect, Loop, Conditional, Transform
 - **51 Agent Templates** — Pre-built for HR, Sales, Finance, Marketing, Legal, IT
-- **Android Agent** — On-device LLM with 20 device tools, runs offline
 - **Knowledge RAG** — Hybrid FTS5 + Vector search. Upload docs, AI answers from your content
-- **Workflow Rules** — Event-driven automation: 6 trigger types → 4 action types
-- **Scheduler** — Cron, interval, one-time tasks with multi-channel notification
+- **Scheduler** — Cron, interval, one-time tasks with retry and multi-channel notification (Telegram, Zalo OA, Email)
+- **20+ Dashboard Pages** — Full CRUD UI with VI/EN, WebSocket real-time, Dark/Light mode
+- **Android Agent** — On-device LLM with 20 device tools, runs 100% offline
 - **AES-256 Security** — Encrypted credentials, command allowlists, runtime sandbox
 
 > ☁️ **Want the hosted version?** Visit [bizclaw.vn](https://bizclaw.vn) — Cloud tab.

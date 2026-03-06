@@ -434,6 +434,12 @@ pub struct ZaloChannelConfig {
     pub rate_limit: ZaloRateLimitConfig,
     #[serde(default)]
     pub allowlist: ZaloAllowlistConfig,
+    /// Zalo OA access token (from developers.zalo.me) — for notification dispatch.
+    #[serde(default)]
+    pub oa_access_token: String,
+    /// Zalo user_id to receive notifications (admin recipient).
+    #[serde(default)]
+    pub notify_user_id: String,
 }
 
 fn default_zalo_mode() -> String {
@@ -448,6 +454,8 @@ impl Default for ZaloChannelConfig {
             personal: ZaloPersonalConfig::default(),
             rate_limit: ZaloRateLimitConfig::default(),
             allowlist: ZaloAllowlistConfig::default(),
+            oa_access_token: String::new(),
+            notify_user_id: String::new(),
         }
     }
 }

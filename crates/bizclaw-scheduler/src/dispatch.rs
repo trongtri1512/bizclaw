@@ -1,5 +1,5 @@
 //! Notification dispatch — actually sends notifications to configured channels.
-//! Supports: Telegram Bot API, Discord Webhook, HTTP Webhook, Dashboard WebSocket.
+//! Supports: Telegram Bot API, Discord Webhook, Zalo OA, HTTP Webhook, Dashboard WebSocket.
 
 use super::notify::{NotifyPriority, Notification};
 
@@ -14,6 +14,11 @@ pub enum NotifyTarget {
     /// Discord Webhook URL.
     Discord {
         webhook_url: String,
+    },
+    /// Zalo Official Account — send via OA REST API.
+    ZaloOA {
+        access_token: String,
+        user_id: String,
     },
     /// Generic HTTP webhook — POST with JSON body.
     Webhook {
@@ -33,6 +38,9 @@ pub async fn dispatch(notification: &Notification, target: &NotifyTarget) -> Res
         }
         NotifyTarget::Discord { webhook_url } => {
             send_discord(webhook_url, notification).await
+        }
+        NotifyTarget::ZaloOA { access_token, user_id } => {
+            send_zalo_oa(access_token, user_id, notification).await
         }
         NotifyTarget::Webhook { url, headers } => {
             send_webhook(url, headers, notification).await
@@ -161,6 +169,57 @@ async fn send_webhook(
     }
 }
 
+/// Send notification via Zalo Official Account API.
+async fn send_zalo_oa(access_token: &str, user_id: &str, notification: &Notification) -> Result<(), String> {
+    let priority_emoji = match notification.priority {
+        NotifyPriority::Urgent => "🚨",
+        NotifyPriority::High => "⚠️",
+        NotifyPriority::Normal => "📢",
+        NotifyPriority::Low => "ℹ️",
+    };
+
+    let text = format!(
+        "{} {}\n\n{}\n\n🔗 Source: {} • {}",
+        priority_emoji,
+        notification.title,
+        notification.body,
+        notification.source,
+        notification.timestamp.format("%H:%M:%S UTC")
+    );
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post("https://openapi.zalo.me/v3.0/oa/message/cs")
+        .bearer_auth(access_token)
+        .json(&serde_json::json!({
+            "recipient": {
+                "user_id": user_id
+            },
+            "message": {
+                "text": text
+            }
+        }))
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|e| format!("Zalo OA send failed: {e}"))?;
+
+    let result: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Zalo OA response error: {e}"))?;
+
+    if result["error"].as_i64().unwrap_or(-1) == 0 {
+        tracing::info!("✅ Zalo OA notification sent: {}", notification.title);
+        Ok(())
+    } else {
+        Err(format!(
+            "Zalo OA error: {}",
+            result["message"].as_str().unwrap_or("unknown")
+        ))
+    }
+}
+
 /// Escape Telegram MarkdownV1 special characters.
 fn escape_markdown(s: &str) -> String {
     s.replace('_', "\\_")
@@ -201,6 +260,15 @@ pub fn targets_from_config(config: &bizclaw_core::config::BizClawConfig) -> Vec<
                     chat_id,
                 }));
             }
+        }
+
+    // Zalo OA
+    if let Some(zalo) = &config.channel.zalo
+        && zalo.enabled && !zalo.oa_access_token.is_empty() && !zalo.notify_user_id.is_empty() {
+            targets.push(("zalo_oa".to_string(), NotifyTarget::ZaloOA {
+                access_token: zalo.oa_access_token.clone(),
+                user_id: zalo.notify_user_id.clone(),
+            }));
         }
 
     // Webhook

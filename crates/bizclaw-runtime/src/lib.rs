@@ -12,13 +12,17 @@ use bizclaw_core::traits::runtime::RuntimeAdapter;
 
 /// Native runtime adapter — runs commands directly on the host.
 pub struct NativeRuntime {
-    /// Max execution time in seconds (default: 30).
+    /// Max execution time in seconds (default: 900 = 15 min).
     pub timeout_secs: u64,
 }
 
 impl Default for NativeRuntime {
     fn default() -> Self {
-        Self { timeout_secs: 30 }
+        let timeout = std::env::var("BIZCLAW_SHELL_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(900);
+        Self { timeout_secs: timeout }
     }
 }
 
@@ -52,8 +56,9 @@ impl RuntimeAdapter for NativeRuntime {
         .await
         .map_err(|_| {
             bizclaw_core::error::BizClawError::Other(format!(
-                "Command timed out after {}s: {}",
+                "Command timed out after {}s ({}min): {}",
                 self.timeout_secs,
+                self.timeout_secs / 60,
                 &command[..command.len().min(100)]
             ))
         })??;
@@ -86,6 +91,10 @@ pub struct SandboxedRuntime {
 
 impl Default for SandboxedRuntime {
     fn default() -> Self {
+        let timeout = std::env::var("BIZCLAW_SHELL_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(900);
         Self {
             allowed_commands: vec![
                 "ls".into(), "cat".into(), "echo".into(), "grep".into(),
@@ -94,7 +103,7 @@ impl Default for SandboxedRuntime {
                 "uniq".into(), "tr".into(), "cut".into(), "sed".into(),
                 "awk".into(), "curl".into(), "python3".into(), "node".into(),
             ],
-            timeout_secs: 30,
+            timeout_secs: timeout,
         }
     }
 }

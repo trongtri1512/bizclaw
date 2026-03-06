@@ -3949,38 +3949,246 @@ pub async fn tts_voices() -> Json<serde_json::Value> {
 // ═══ Workflows API ═══
 
 /// List available workflow templates.
-pub async fn workflows_list() -> Json<serde_json::Value> {
-    let templates = vec![
-        serde_json::json!({"id":"content_pipeline","name":"Content Pipeline","description":"Draft → Review → Polish","tags":["content","writing"],"steps":[
-            {"name":"Draft","type":"Sequential","agent_role":"Writer"},
-            {"name":"Review","type":"Sequential","agent_role":"Editor"},
-            {"name":"Polish","type":"Sequential","agent_role":"Proofreader"},
+pub async fn workflows_list(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    // Built-in templates
+    let mut workflows = vec![
+        serde_json::json!({"id":"content_pipeline","name":"Content Pipeline","description":"Draft → Review → Polish","tags":["content","writing"],"builtin":true,"steps":[
+            {"name":"Draft","type":"Sequential","agent_role":"Writer","prompt":""},
+            {"name":"Review","type":"Sequential","agent_role":"Editor","prompt":""},
+            {"name":"Polish","type":"Sequential","agent_role":"Proofreader","prompt":""},
         ]}),
-        serde_json::json!({"id":"expert_consensus","name":"Expert Consensus","description":"3 experts analyze in parallel → Merge","tags":["analysis","multi-agent"],"steps":[
-            {"name":"Expert Analysis","type":"FanOut","agent_role":"3 Experts (parallel)"},
-            {"name":"Merge Results","type":"Collect","agent_role":"Synthesizer"},
+        serde_json::json!({"id":"expert_consensus","name":"Expert Consensus","description":"3 experts analyze in parallel → Merge","tags":["analysis","multi-agent"],"builtin":true,"steps":[
+            {"name":"Expert Analysis","type":"FanOut","agent_role":"3 Experts (parallel)","prompt":""},
+            {"name":"Merge Results","type":"Collect","agent_role":"Synthesizer","prompt":""},
         ]}),
-        serde_json::json!({"id":"quality_pipeline","name":"Quality Gate","description":"Generate → Loop evaluate until APPROVED","tags":["quality","loop"],"steps":[
-            {"name":"Generate","type":"Sequential","agent_role":"Creator"},
-            {"name":"Evaluate","type":"Loop","agent_role":"Evaluator (until APPROVED)"},
+        serde_json::json!({"id":"quality_pipeline","name":"Quality Gate","description":"Generate → Loop evaluate until APPROVED","tags":["quality","loop"],"builtin":true,"steps":[
+            {"name":"Generate","type":"Sequential","agent_role":"Creator","prompt":""},
+            {"name":"Evaluate","type":"Loop","agent_role":"Evaluator (until APPROVED)","prompt":""},
         ]}),
-        serde_json::json!({"id":"research_pipeline","name":"Research Pipeline","description":"Search → Analyze → Synthesize → Report","tags":["research","data"],"steps":[
-            {"name":"Search","type":"Sequential","agent_role":"Researcher"},
-            {"name":"Analyze","type":"Sequential","agent_role":"Analyst"},
-            {"name":"Synthesize","type":"Sequential","agent_role":"Writer"},
-            {"name":"Report","type":"Transform","agent_role":"Formatter"},
+        serde_json::json!({"id":"research_pipeline","name":"Research Pipeline","description":"Search → Analyze → Synthesize → Report","tags":["research","data"],"builtin":true,"steps":[
+            {"name":"Search","type":"Sequential","agent_role":"Researcher","prompt":""},
+            {"name":"Analyze","type":"Sequential","agent_role":"Analyst","prompt":""},
+            {"name":"Synthesize","type":"Sequential","agent_role":"Writer","prompt":""},
+            {"name":"Report","type":"Transform","agent_role":"Formatter","prompt":""},
         ]}),
-        serde_json::json!({"id":"translation_pipeline","name":"Translation Pipeline","description":"Translate → Quality verification","tags":["language","translation"],"steps":[
-            {"name":"Translate","type":"Sequential","agent_role":"Translator"},
-            {"name":"Verify Quality","type":"Conditional","agent_role":"QA Checker"},
+        serde_json::json!({"id":"translation_pipeline","name":"Translation Pipeline","description":"Translate → Quality verification","tags":["language","translation"],"builtin":true,"steps":[
+            {"name":"Translate","type":"Sequential","agent_role":"Translator","prompt":""},
+            {"name":"Verify Quality","type":"Conditional","agent_role":"QA Checker","prompt":""},
         ]}),
-        serde_json::json!({"id":"code_review","name":"Code Review Pipeline","description":"3 reviewers in parallel → Security → Summary","tags":["code","security"],"steps":[
-            {"name":"Code Analysis","type":"FanOut","agent_role":"3 Reviewers (parallel)"},
-            {"name":"Security Check","type":"Sequential","agent_role":"Security Auditor"},
-            {"name":"Summary","type":"Collect","agent_role":"Lead Reviewer"},
+        serde_json::json!({"id":"code_review","name":"Code Review Pipeline","description":"3 reviewers in parallel → Security → Summary","tags":["code","security"],"builtin":true,"steps":[
+            {"name":"Code Analysis","type":"FanOut","agent_role":"3 Reviewers (parallel)","prompt":""},
+            {"name":"Security Check","type":"Sequential","agent_role":"Security Auditor","prompt":""},
+            {"name":"Summary","type":"Collect","agent_role":"Lead Reviewer","prompt":""},
         ]}),
     ];
-    Json(serde_json::json!({"ok": true, "workflows": templates}))
+
+    // Load user-created workflows from disk
+    let wf_dir = state.config_path.parent()
+        .unwrap_or(std::path::Path::new("."))
+        .join("workflows");
+    if wf_dir.exists() {
+        if let Ok(entries) = std::fs::read_dir(&wf_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().map(|e| e == "json").unwrap_or(false) {
+                    if let Ok(content) = std::fs::read_to_string(&path) {
+                        if let Ok(wf) = serde_json::from_str::<serde_json::Value>(&content) {
+                            workflows.push(wf);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Json(serde_json::json!({"ok": true, "workflows": workflows}))
+}
+
+/// Create a new workflow.
+pub async fn workflows_create(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    let name = body["name"].as_str().unwrap_or("Untitled Workflow");
+    let description = body["description"].as_str().unwrap_or("");
+    let tags: Vec<String> = body["tags"].as_array()
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    let steps = body["steps"].clone();
+    let input_prompt = body["input_prompt"].as_str().unwrap_or("");
+
+    let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
+    let id = format!("wf-{:x}-{:x}", ts as u64, std::process::id());
+
+    let workflow = serde_json::json!({
+        "id": id,
+        "name": name,
+        "description": description,
+        "tags": tags,
+        "steps": steps,
+        "input_prompt": input_prompt,
+        "builtin": false,
+        "created_at": chrono::Utc::now().to_rfc3339(),
+    });
+
+    // Save to disk
+    let wf_dir = state.config_path.parent()
+        .unwrap_or(std::path::Path::new("."))
+        .join("workflows");
+    let _ = std::fs::create_dir_all(&wf_dir);
+    let path = wf_dir.join(format!("{}.json", id));
+    if let Ok(json) = serde_json::to_string_pretty(&workflow) {
+        let _ = std::fs::write(&path, json);
+    }
+
+    tracing::info!("✅ Workflow created: {} ({})", name, id);
+    Json(serde_json::json!({"ok": true, "id": id, "workflow": workflow}))
+}
+
+/// Update an existing workflow.
+pub async fn workflows_update(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    let wf_dir = state.config_path.parent()
+        .unwrap_or(std::path::Path::new("."))
+        .join("workflows");
+    let path = wf_dir.join(format!("{}.json", id));
+
+    if !path.exists() {
+        return Json(serde_json::json!({"ok": false, "error": "Workflow not found"}));
+    }
+
+    let mut workflow: serde_json::Value = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or(serde_json::json!({}));
+
+    // Merge updates
+    if let Some(name) = body["name"].as_str() { workflow["name"] = serde_json::json!(name); }
+    if let Some(desc) = body["description"].as_str() { workflow["description"] = serde_json::json!(desc); }
+    if body.get("steps").is_some() { workflow["steps"] = body["steps"].clone(); }
+    if body.get("tags").is_some() { workflow["tags"] = body["tags"].clone(); }
+    if let Some(ip) = body["input_prompt"].as_str() { workflow["input_prompt"] = serde_json::json!(ip); }
+    workflow["updated_at"] = serde_json::json!(chrono::Utc::now().to_rfc3339());
+
+    if let Ok(json) = serde_json::to_string_pretty(&workflow) {
+        let _ = std::fs::write(&path, json);
+    }
+
+    tracing::info!("✅ Workflow updated: {}", id);
+    Json(serde_json::json!({"ok": true, "workflow": workflow}))
+}
+
+/// Delete a workflow.
+pub async fn workflows_delete(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Json<serde_json::Value> {
+    let wf_dir = state.config_path.parent()
+        .unwrap_or(std::path::Path::new("."))
+        .join("workflows");
+    let path = wf_dir.join(format!("{}.json", id));
+
+    if path.exists() {
+        let _ = std::fs::remove_file(&path);
+        tracing::info!("🗑️ Workflow deleted: {}", id);
+        Json(serde_json::json!({"ok": true}))
+    } else {
+        Json(serde_json::json!({"ok": false, "error": "Workflow not found or is a built-in template"}))
+    }
+}
+
+/// Run a workflow — execute steps sequentially through the agent.
+pub async fn workflows_run(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    let workflow_id = body["workflow_id"].as_str().unwrap_or("");
+    let input = body["input"].as_str().unwrap_or("");
+
+    if workflow_id.is_empty() {
+        return Json(serde_json::json!({"ok": false, "error": "workflow_id is required"}));
+    }
+
+    // Find the workflow (check user files first, then built-in templates)
+    let wf_dir = state.config_path.parent()
+        .unwrap_or(std::path::Path::new("."))
+        .join("workflows");
+    let user_path = wf_dir.join(format!("{}.json", workflow_id));
+
+    let workflow: Option<serde_json::Value> = if user_path.exists() {
+        std::fs::read_to_string(&user_path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+    } else {
+        // Check built-in templates
+        let list_resp = workflows_list(State(state.clone())).await;
+        let wfs = list_resp.0["workflows"].as_array().cloned().unwrap_or_default();
+        wfs.into_iter().find(|w| w["id"].as_str() == Some(workflow_id))
+    };
+
+    let workflow = match workflow {
+        Some(wf) => wf,
+        None => return Json(serde_json::json!({"ok": false, "error": format!("Workflow '{}' not found", workflow_id)})),
+    };
+
+    let steps = workflow["steps"].as_array().cloned().unwrap_or_default();
+    let wf_name = workflow["name"].as_str().unwrap_or(workflow_id);
+
+    tracing::info!("▶ Running workflow '{}' ({} steps), input: {:?}", wf_name, steps.len(), input);
+
+    let mut results: Vec<serde_json::Value> = Vec::new();
+    let mut current_input = input.to_string();
+
+    for (i, step) in steps.iter().enumerate() {
+        let step_name = step["name"].as_str().unwrap_or("Step");
+        let agent_role = step["agent_role"].as_str().unwrap_or("Agent");
+        let step_prompt = step["prompt"].as_str().unwrap_or("");
+
+        let prompt = if step_prompt.is_empty() {
+            format!(
+                "[Workflow: {} | Step {}: {} | Role: {}]\n\nPrevious context:\n{}\n\nPlease complete this step as the {} role.",
+                wf_name, i + 1, step_name, agent_role, current_input, agent_role
+            )
+        } else {
+            format!("{}\n\nInput:\n{}", step_prompt, current_input)
+        };
+
+        tracing::info!("  → Step {}/{}: {} ({})", i + 1, steps.len(), step_name, agent_role);
+
+        let response = {
+            let mut agent = state.agent.lock().await;
+            if let Some(agent) = agent.as_mut() {
+                match agent.process(&prompt).await {
+                    Ok(r) => r,
+                    Err(e) => format!("Error in step '{}': {}", step_name, e),
+                }
+            } else {
+                "Agent not available".to_string()
+            }
+        };
+
+        results.push(serde_json::json!({
+            "step": i + 1,
+            "name": step_name,
+            "agent_role": agent_role,
+            "output": response,
+        }));
+
+        current_input = response;
+    }
+
+    tracing::info!("✅ Workflow '{}' completed ({} steps)", wf_name, results.len());
+
+    Json(serde_json::json!({
+        "ok": true,
+        "workflow": wf_name,
+        "steps_completed": results.len(),
+        "results": results,
+        "final_output": current_input,
+    }))
 }
 
 // ═══ Skills API ═══

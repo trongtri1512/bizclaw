@@ -34,6 +34,9 @@ pub struct OpenAiCompatibleProvider {
     default_models: Vec<ModelInfo>,
     /// HTTP client.
     client: reqwest::Client,
+    /// Models that have been detected as incapable of tool calling.
+    /// Once a model fails tool calling, we skip sending tools on subsequent calls.
+    no_tool_models: std::sync::Mutex<std::collections::HashSet<String>>,
 }
 
 impl OpenAiCompatibleProvider {
@@ -89,6 +92,7 @@ impl OpenAiCompatibleProvider {
             auth_style: registry.auth_style,
             default_models,
             client: reqwest::Client::new(),
+            no_tool_models: std::sync::Mutex::new(std::collections::HashSet::new()),
         })
     }
 
@@ -121,6 +125,7 @@ impl OpenAiCompatibleProvider {
             auth_style,
             default_models: vec![],
             client: reqwest::Client::new(),
+            no_tool_models: std::sync::Mutex::new(std::collections::HashSet::new()),
         })
     }
 
@@ -153,6 +158,19 @@ impl Provider for OpenAiCompatibleProvider {
         }
 
         let is_anthropic = self.name == "anthropic" || self.base_url.contains("anthropic");
+
+        // ═══ PRE-FLIGHT: Skip tools for known-incapable models ═══
+        // If we've already detected this model can't handle tools, don't send them.
+        // This saves tokens and avoids hallucinated tool calls/dumps.
+        let tools = {
+            let lock = self.no_tool_models.lock().unwrap_or_else(|p| p.into_inner());
+            if lock.contains(&params.model) {
+                tracing::debug!("🚫 Skipping tools for model '{}' (known no-tool)", params.model);
+                &[] as &[ToolDefinition]
+            } else {
+                tools
+            }
+        };
 
         // Build request body — standard OpenAI format
         let mut body = json!({
@@ -305,7 +323,8 @@ impl Provider for OpenAiCompatibleProvider {
 
         let content = choice["message"]["content"].as_str().map(String::from);
 
-        let tool_calls = if let Some(tc) = choice["message"]["tool_calls"].as_array() {
+        // Parse tool_calls FIRST so we can inspect them in detection below
+        let tool_calls: Vec<ToolCall> = if let Some(tc) = choice["message"]["tool_calls"].as_array() {
             tc.iter()
                 .filter_map(|t| {
                     Some(ToolCall {
@@ -321,6 +340,119 @@ impl Provider for OpenAiCompatibleProvider {
         } else {
             vec![]
         };
+
+        // ═══ SMART DETECTION: Model dumping tool schemas as text ═══
+        // Small models (e.g., llama3.2:1b, phi, tinyllama) can't handle tool calling
+        // and return the tool definitions as plain text content instead.
+        // Detect this pattern and auto-retry WITHOUT tools.
+        // Also detect FAKE tool_calls where the model hallucinates nonsensical calls.
+        let mut needs_retry_without_tools = false;
+
+        if !tools.is_empty() {
+            // Check 1: Content looks like dumped tool schemas
+            if let Some(ref text) = content {
+                let text_lower = text.to_lowercase();
+                let looks_like_tool_dump =
+                    // Direct patterns
+                    text.contains("{function")
+                    || text.contains("\"function\"")
+                    || text.contains("\"type\":\"function\"")
+                    // Escaped JSON patterns (common with small models)
+                    || text.contains("\\\"function\\\"")
+                    || text.contains("{\\\"")
+                    // Tool name + description patterns  
+                    || (text_lower.contains("shell") && text_lower.contains("execute") && text_lower.contains("command"))
+                    || (text_lower.contains("file") && text_lower.contains("read") && text_lower.contains("write") && text_lower.contains("path"))
+                    || (text.contains("{edit_file") || text.contains("{shell") || text.contains("{file"))
+                    // Generic schema dump detection (JSON-like with function keywords)
+                    || (text.contains("function") && text.contains("parameters") && text.contains("description") && text.len() > 200)
+                    // Perl/garbled tool echoing from small models
+                    || (text.contains("perl") && text.contains("command") && text.contains("type") && text.contains("string"));
+
+                if looks_like_tool_dump {
+                    tracing::warn!(
+                        "⚠️ Model '{}' dumping tool schemas as text (len={}) — retrying without tools",
+                        params.model, text.len()
+                    );
+                    needs_retry_without_tools = true;
+                }
+            }
+
+            // Check 2: Fake/hallucinated tool_calls from small models
+            // Small models sometimes return tool_calls but with nonsensical arguments
+            // e.g., calling "shell" with {"command":"shell","shell":"stdout"}
+            if !needs_retry_without_tools && !tool_calls.is_empty() {
+                let mut suspicious_calls = 0;
+                for tc in &tool_calls {
+                    let args = &tc.function.arguments;
+                    let name = &tc.function.name;
+                    // Hallucination: argument value equals tool name
+                    if args.contains(&format!("\"{}\":\"{}\"", name, name))
+                        || args.contains(&format!("\"command\":\"{}\"", name))
+                    {
+                        suspicious_calls += 1;
+                    }
+                    // Hallucination: empty or minimal args for tools that need real input
+                    if args.len() < 5 || args == "{}" || args == "null" {
+                        suspicious_calls += 1;
+                    }
+                    // Hallucination: args contain tool schema keywords instead of actual values
+                    if args.contains("\"type\":\"string\"") || args.contains("\"description\":") {
+                        suspicious_calls += 1;
+                    }
+                }
+                if suspicious_calls > 0 {
+                    tracing::warn!(
+                        "⚠️ Model '{}' produced {}/{} hallucinated tool calls — retrying without tools",
+                        params.model, suspicious_calls, tool_calls.len()
+                    );
+                    needs_retry_without_tools = true;
+                }
+            }
+
+            if needs_retry_without_tools {
+                // Remember this model can't handle tools
+                {
+                    let mut lock = self.no_tool_models.lock().unwrap_or_else(|p| p.into_inner());
+                    lock.insert(params.model.clone());
+                    tracing::info!("📝 Model '{}' added to no-tool list for future requests", params.model);
+                }
+
+                // Retry without tools
+                body.as_object_mut().map(|m| m.remove("tools"));
+                let retry_req = self
+                    .client
+                    .post(&url)
+                    .header("Content-Type", "application/json")
+                    .json(&body);
+                let retry_req = self.apply_auth(retry_req);
+                let retry_resp = retry_req.send().await.map_err(|e| {
+                    BizClawError::Http(format!("{} retry (no tools) failed: {}", self.name, e))
+                })?;
+                if retry_resp.status().is_success() {
+                    let rjson: Value = retry_resp
+                        .json()
+                        .await
+                        .map_err(|e| BizClawError::Http(e.to_string()))?;
+                    let rchoice = rjson["choices"]
+                        .get(0)
+                        .ok_or_else(|| BizClawError::Provider("No choices in retry".into()))?;
+                    let rcontent = rchoice["message"]["content"].as_str().map(String::from);
+                    let rusage = rjson["usage"].as_object().map(|u| Usage {
+                        prompt_tokens: u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                        completion_tokens: u.get("completion_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                        total_tokens: u.get("total_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                    });
+                    return Ok(ProviderResponse {
+                        content: rcontent,
+                        tool_calls: vec![],
+                        finish_reason: rchoice["finish_reason"].as_str().map(String::from),
+                        usage: rusage,
+                    });
+                }
+                // If retry also failed, fall through to return original (garbled) response
+            }
+        }
 
         let usage = json["usage"].as_object().map(|u| Usage {
             prompt_tokens: u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,

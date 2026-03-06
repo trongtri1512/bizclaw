@@ -122,6 +122,8 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                         let request_id = format!("req_{request_counter}");
                         let content = json["content"].as_str().unwrap_or("").to_string();
                         let stream = json["stream"].as_bool().unwrap_or(true);
+                        // Optional: target a specific agent by name for multi-agent routing
+                        let target_agent = json["agent"].as_str().map(|s| s.to_string());
 
                         if content.is_empty() {
                             send_error(&mut socket, "Empty message").await;
@@ -131,6 +133,98 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                         // Re-read provider/model from config each request (may have changed)
                         let provider = active_provider(&state);
                         let model = active_model(&state);
+
+                        // ── Multi-Agent routing via Orchestrator ──
+                        // If a specific agent is requested AND exists in orchestrator, route to it
+                        if let Some(ref agent_name) = target_agent {
+                            let orch_has_agent = {
+                                let orch = state.orchestrator.lock().await;
+                                orch.has_agent(agent_name)
+                            };
+                            if orch_has_agent {
+                                tracing::info!(
+                                    "Chat req={request_id}: MULTI-AGENT → agent={agent_name}, len={}",
+                                    content.len()
+                                );
+                                let _ = send_json(
+                                    &mut socket,
+                                    &serde_json::json!({
+                                        "type": "chat_start",
+                                        "request_id": &request_id,
+                                        "agent": agent_name,
+                                        "mode": "multi-agent",
+                                    }),
+                                )
+                                .await;
+
+                                let result = {
+                                    let mut orch = state.orchestrator.lock().await;
+                                    orch.send_to(agent_name, &content).await
+                                };
+
+                                match result {
+                                    Ok(response) => {
+                                        if stream {
+                                            let chunk_size = 8;
+                                            let chars: Vec<char> = response.chars().collect();
+                                            let mut idx: u64 = 0;
+                                            for chunk in chars.chunks(chunk_size) {
+                                                let text: String = chunk.iter().collect();
+                                                let _ = send_json(
+                                                    &mut socket,
+                                                    &serde_json::json!({
+                                                        "type": "chat_chunk",
+                                                        "request_id": &request_id,
+                                                        "content": &text,
+                                                        "index": idx,
+                                                    }),
+                                                )
+                                                .await;
+                                                idx += 1;
+                                            }
+                                            let _ = send_json(
+                                                &mut socket,
+                                                &serde_json::json!({
+                                                    "type": "chat_done",
+                                                    "request_id": &request_id,
+                                                    "total_tokens": idx,
+                                                    "full_content": &response,
+                                                    "mode": "multi-agent",
+                                                    "agent": agent_name,
+                                                }),
+                                            )
+                                            .await;
+                                        } else {
+                                            let _ = send_json(
+                                                &mut socket,
+                                                &serde_json::json!({
+                                                    "type": "chat_done",
+                                                    "request_id": &request_id,
+                                                    "full_content": &response,
+                                                    "mode": "multi-agent",
+                                                    "agent": agent_name,
+                                                }),
+                                            )
+                                            .await;
+                                        }
+                                    }
+                                    Err(e) => {
+                                        let _ = send_json(
+                                            &mut socket,
+                                            &serde_json::json!({
+                                                "type": "chat_error",
+                                                "request_id": &request_id,
+                                                "error": e.to_string(),
+                                                "agent": agent_name,
+                                            }),
+                                        )
+                                        .await;
+                                    }
+                                }
+                                continue; // Skip default agent path
+                            }
+                            // If agent not in orchestrator, fall through to default path
+                        }
 
                         // Dynamic agent check: re-check each request so config changes take effect
                         let has_agent = {

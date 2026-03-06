@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.3.2] — 2026-03-06
+
+### Added
+- **Dropdown Selects**: Provider/Model selection now uses `<select>` dropdown populated from `/api/v1/providers`
+  - SettingsPage: Provider + Model dropdowns with auto-populate models based on selected provider
+  - AgentsPage: Provider + Model dropdowns in create/edit agent form
+  - OrchestrationPage: From/To Agent dropdowns populated from `/api/v1/agents`
+  - All selects include "✏️ Nhập thủ công..." fallback option for custom values
+- **Multi-instance Channels**: ChannelsPage now supports multiple instances per channel type
+  - "➕ Thêm kênh" button with channel type selector dropdown
+  - Per-instance naming (e.g., "Bot bán hàng", "Zalo cá nhân 2")
+  - Supports: Telegram, Zalo, Discord, Email, Webhook (multi:true)
+  - Display name field in channel config form
+- **🐕 Watchdog Script**: `scripts/watchdog.sh` — Auto-kill hung terminal processes
+  - `--status`: Show running BizClaw processes
+  - `--kill-all`: Emergency kill everything
+  - `--daemon`: Background watchdog (check every 60s)
+  - `--dry-run`: Preview what would be killed
+  - Configurable: `WATCHDOG_MAX_MINUTES=20` env var
+- **Workflow `/watchdog`**: Slash command for quick process management
+
+### Changed
+- **Shell timeout**: 30s → 900s (15 minutes) — prevents premature command termination
+  - `crates/bizclaw-tools/src/shell.rs`: Configurable via `timeout_secs` parameter or `BIZCLAW_SHELL_TIMEOUT_SECS` env var
+  - `crates/bizclaw-runtime/src/lib.rs`: NativeRuntime + SandboxedRuntime both upgraded
+  - Per-call timeout support: up to 3600s (1 hour) max
+- **Improved timeout messages**: Now show elapsed minutes alongside seconds
+- **4 files modified**: app.js (+344 lines), shell.rs, lib.rs (runtime), Cargo.lock
+
 ## [0.3.1] — 2026-03-06
 
 ### Fixed

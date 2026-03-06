@@ -83,7 +83,7 @@ impl Tool for ShellTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "shell".into(),
-            description: "Execute a shell command and return stdout/stderr. Commands are validated against security rules — shell metacharacters (;|&`$) and dangerous patterns are blocked.".into(),
+            description: "Execute a shell command and return stdout/stderr. Commands are validated against security rules — shell metacharacters (;|&`$) and dangerous patterns are blocked. Default timeout: 15 minutes (configurable via BIZCLAW_SHELL_TIMEOUT_SECS env var).".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -94,6 +94,10 @@ impl Tool for ShellTool {
                     "workdir": {
                         "type": "string",
                         "description": "Working directory (optional)"
+                    },
+                    "timeout_secs": {
+                        "type": "integer",
+                        "description": "Timeout in seconds (optional, default: 900 = 15 min, max: 3600)"
                     }
                 },
                 "required": ["command"]
@@ -111,6 +115,16 @@ impl Tool for ShellTool {
 
         let workdir = args["workdir"].as_str();
 
+        // Timeout: per-call > env var > default (900s = 15 min)
+        let default_timeout: u64 = std::env::var("BIZCLAW_SHELL_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(900);
+        let timeout_secs = args["timeout_secs"]
+            .as_u64()
+            .map(|t| t.min(3600)) // Cap at 1 hour max
+            .unwrap_or(default_timeout);
+
         // ═══ MANDATORY SECURITY CHECK (defense-in-depth) ═══
         if let Some(block_reason) = Self::validate_command(command) {
             tracing::warn!("🛡️ ShellTool security block: {}", block_reason);
@@ -121,7 +135,7 @@ impl Tool for ShellTool {
             });
         }
 
-        // Execute with timeout (30s max)
+        // Execute with configurable timeout
         let mut cmd = tokio::process::Command::new("sh");
         cmd.arg("-c").arg(command);
 
@@ -137,14 +151,20 @@ impl Tool for ShellTool {
             cmd.current_dir(dir);
         }
 
+        tracing::info!("🖥️ ShellTool: executing (timeout={}s): {}", timeout_secs, &command[..command.len().min(100)]);
+
         let output = tokio::time::timeout(
-            std::time::Duration::from_secs(30),
+            std::time::Duration::from_secs(timeout_secs),
             cmd.output(),
         )
         .await
-        .map_err(|_| bizclaw_core::error::BizClawError::Timeout(
-            "Command timed out after 30s".into()
-        ))?
+        .map_err(|_| {
+            tracing::warn!("⏰ ShellTool: command timed out after {}s: {}", timeout_secs, &command[..command.len().min(100)]);
+            bizclaw_core::error::BizClawError::Timeout(
+                format!("Command timed out after {}s ({}min). Command: {}. Increase timeout with timeout_secs parameter or BIZCLAW_SHELL_TIMEOUT_SECS env var.",
+                    timeout_secs, timeout_secs / 60, &command[..command.len().min(80)])
+            )
+        })?
         .map_err(|e| bizclaw_core::error::BizClawError::Tool(e.to_string()))?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();

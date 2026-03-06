@@ -187,6 +187,20 @@ function ChatPage({ config, lang }) {
   const [wsInfo, setWsInfo] = useState({});
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
+  // Multi-agent support
+  const [agentsList, setAgentsList] = useState([]);
+  const [selectedAgent, setSelectedAgent] = useState(''); // '' = default agent
+
+  // Fetch available agents
+  useEffect(() => {
+    (async () => {
+      try {
+        const r = await authFetch('/api/v1/agents');
+        const d = await r.json();
+        setAgentsList(d.agents || []);
+      } catch(e) { console.warn('Agents fetch:', e); }
+    })();
+  }, []);
 
   // Auto-scroll to bottom
   useEffect(() => {
@@ -219,7 +233,7 @@ function ChatPage({ config, lang }) {
 
         case 'chat_done': {
           const fullContent = msg.full_content || '';
-          setMessages(prev => [...prev, { type: 'bot', content: fullContent, provider: msg.provider, model: msg.model, mode: msg.mode, context: msg.context }]);
+          setMessages(prev => [...prev, { type: 'bot', content: fullContent, provider: msg.provider, model: msg.model, mode: msg.mode, context: msg.context, agent: msg.agent }]);
           setStreamContent('');
           setStreamReqId(null);
           setThinking(false);
@@ -293,12 +307,27 @@ function ChatPage({ config, lang }) {
     }
 
     // Add user message to UI
-    setMessages(prev => [...prev, { type: 'user', content: text }]);
+    setMessages(prev => [...prev, { type: 'user', content: text, agent: selectedAgent || undefined }]);
     setThinking(true);
 
-    // Send via WebSocket
+    // Send via WebSocket — include agent name for multi-agent routing
     if (window._ws && window._ws.readyState === 1) {
-      window._ws.send(JSON.stringify({ type: 'chat', content: text, stream: true }));
+      const payload = { type: 'chat', content: text, stream: true };
+      if (selectedAgent && selectedAgent !== '__broadcast__') payload.agent = selectedAgent;
+      
+      if (selectedAgent === '__broadcast__') {
+        // Broadcast mode: send to ALL registered agents
+        if (agentsList.length === 0) {
+          setMessages(prev => [...prev, { type: 'system', content: '⚠️ No agents registered. Create agents first in AI Agent page.', error: true }]);
+          setThinking(false);
+          return;
+        }
+        agentsList.forEach(a => {
+          window._ws.send(JSON.stringify({ type: 'chat', content: text, stream: true, agent: a.name }));
+        });
+      } else {
+        window._ws.send(JSON.stringify(payload));
+      }
     } else {
       setMessages(prev => [...prev, { type: 'system', content: '🔴 WebSocket not connected. Reconnecting...', error: true }]);
       setThinking(false);
@@ -368,12 +397,20 @@ function ChatPage({ config, lang }) {
       <!-- Main chat area -->
       <div class="chat-main">
         <div class="chat-main-header">
-          <div class="chat-target">
+          <div class="chat-target" style="display:flex;align-items:center;gap:10px">
             <span class="chat-target-icon">🤖</span>
             <div>
-              <div class="chat-target-name">${config?.agent_name || 'BizClaw AI'}</div>
+              <div class="chat-target-name">${selectedAgent ? (agentsList.find(a=>a.name===selectedAgent)?.name || selectedAgent) : (config?.agent_name || 'BizClaw AI')}</div>
               <div class="chat-target-sub">${wsInfo.provider || config?.default_provider || '—'} · ${wsInfo.model || '—'}${wsInfo.agent_engine ? ' · 🧠 Agent' : ''}</div>
             </div>
+            ${agentsList.length > 0 ? html`
+              <select value=${selectedAgent} onChange=${e=>setSelectedAgent(e.target.value)}
+                style="padding:4px 8px;font-size:12px;border-radius:6px;border:1px solid var(--border);background:var(--bg2);color:var(--text);cursor:pointer;min-width:140px">
+                <option value="">🤖 Default Agent</option>
+                ${agentsList.map(a => html`<option key=${a.name} value=${a.name}>${a.role === 'coder' ? '💻' : a.role === 'writer' ? '✍️' : a.role === 'analyst' ? '📊' : '🤖'} ${a.name}</option>`)}
+                <option value="__broadcast__">📢 All Agents (Broadcast)</option>
+              </select>
+            ` : ''}
           </div>
           <div style="display:flex;gap:6px;align-items:center">
             <span class="badge ${thinking ? 'badge-yellow pulse' : 'badge-green'}">${thinking ? '⏳ thinking' : '● ready'}</span>
@@ -400,7 +437,9 @@ function ChatPage({ config, lang }) {
               <div key=${i} class=${m.type === 'user' ? 'msg msg-user' : m.type === 'bot' ? 'msg msg-bot' : 'msg msg-system'}
                 style=${m.error ? 'color:var(--red)' : ''}>
                 ${m.type === 'bot' ? renderContent(m.content) : m.content}
-                ${m.type === 'bot' && m.mode === 'agent' ? html`<div style="font-size:10px;color:var(--text2);margin-top:4px;text-align:right">🧠 Agent${m.context ? ' · ctx:' + m.context.total_tokens : ''}</div>` : ''}
+                ${m.type === 'bot' ? html`<div style="font-size:10px;color:var(--text2);margin-top:4px;text-align:right">
+                  ${m.agent ? '🤖 ' + m.agent : ''}${m.mode === 'agent' ? ' 🧠 Agent' : ''}${m.mode === 'multi-agent' ? ' 🔀 Multi-Agent' : ''}${m.context ? ' · ctx:' + m.context.total_tokens : ''}
+                </div>` : ''}
               </div>
             `)}
             ${streamContent ? html`<div class="msg msg-bot">${renderContent(streamContent)}<span class="pulse" style="color:var(--accent2)">▊</span></div>` : ''}
@@ -690,18 +729,20 @@ function HandsPage({ lang }) {
   const saveHand = async () => {
     if(!form.name.trim()) { showToast('⚠️ Nhập tên Hand','error'); return; }
     try {
+      // Backend API expects: name, task_type (string), cron/interval_secs, prompt/action
       const body = {
         name: form.name,
-        task_type: { Cron: { expression: form.schedule } },
-        action: { AgentPrompt: { prompt: form.prompt } },
+        task_type: 'cron',
+        cron: form.schedule || '0 */6 * * *',
+        prompt: form.prompt || '',
         icon: form.icon,
         phases: form.phases,
-        enabled: true,
-        retry: { max_retries: 3, delay_secs: 60 }
       };
       if(editHand && editHand.id) {
-        const r = await authFetch('/api/v1/scheduler/tasks/'+editHand.id, {
-          method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)
+        // No PUT route — delete + recreate
+        try { await authFetch('/api/v1/scheduler/tasks/'+editHand.id, {method:'DELETE'}); } catch(e) {}
+        const r = await authFetch('/api/v1/scheduler/tasks', {
+          method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)
         });
         const d = await r.json();
         if(d.ok || d.id) { showToast('✅ Đã cập nhật: '+form.name,'success'); setShowForm(false); load(); }
@@ -844,14 +885,22 @@ function SettingsPage({ config, lang }) {
   const [showNewFile, setShowNewFile] = useState(false);
   const [newFileName, setNewFileName] = useState('');
   const [loading, setLoading] = useState(true);
+  const [providersList, setProvidersList] = useState([]);
+  const [customProvider, setCustomProvider] = useState(false);
+  const [customModel, setCustomModel] = useState(false);
   const inp = 'width:100%;padding:8px;margin-top:4px;background:var(--bg2);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px';
 
   useEffect(() => {
     const loadTimeout = setTimeout(() => setLoading(false), 8000); // Safety: never stuck loading > 8s
     (async () => {
       try {
-        const r = await authFetch('/api/v1/config');
-        const d = await r.json();
+        const [cfgRes, provRes] = await Promise.all([
+          authFetch('/api/v1/config'),
+          authFetch('/api/v1/providers'),
+        ]);
+        const d = await cfgRes.json();
+        const provData = await provRes.json();
+        setProvidersList(provData.providers || []);
         if(d && !d.error) { // Only populate form if API returned valid config
           setForm({
             provider: d.default_provider || '',
@@ -862,6 +911,9 @@ function SettingsPage({ config, lang }) {
             autonomy: d.autonomy?.level || (typeof d.autonomy === 'string' ? d.autonomy : 'supervised'),
             sysprompt: d.identity?.system_prompt || d.system_prompt || ''
           });
+          // Check if current provider/model exists in list
+          const pList = provData.providers || [];
+          if(d.default_provider && !pList.find(p => p.name === d.default_provider)) setCustomProvider(true);
           if(d.brain) {
             setBrainForm(f => ({...f,
               enabled: d.brain.enabled || false,
@@ -953,8 +1005,51 @@ function SettingsPage({ config, lang }) {
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
         <div class="card"><div class="card-label">🤖 ${t('set.provider_section',lang)}</div>
           <div style="display:grid;gap:10px;font-size:13px">
-            <label>${t('set.provider',lang)}<input style="${inp}" value=${form.provider} onInput=${e=>setForm(f=>({...f,provider:e.target.value}))} placeholder="openai, ollama, gemini..." /></label>
-            <label>${t('set.model',lang)}<input style="${inp}" value=${form.model} onInput=${e=>setForm(f=>({...f,model:e.target.value}))} placeholder="gpt-4o, llama3..." /></label>
+            <label>${t('set.provider',lang)}
+              ${customProvider ? html`
+                <div style="display:flex;gap:4px;margin-top:4px">
+                  <input style="${inp};flex:1;margin-top:0" value=${form.provider} onInput=${e=>setForm(f=>({...f,provider:e.target.value}))} placeholder="custom-provider" />
+                  <button class="btn btn-outline btn-sm" onClick=${()=>{setCustomProvider(false);if(providersList.length)setForm(f=>({...f,provider:providersList[0].name,model:(providersList[0].models||[])[0]||''}))}} title="Chọn từ danh sách">📋</button>
+                </div>
+              ` : html`
+                <div style="display:flex;gap:4px;margin-top:4px">
+                  <select style="${inp};flex:1;margin-top:0;cursor:pointer" value=${form.provider} onChange=${e=>{
+                    const val=e.target.value;
+                    if(val==='__custom__'){setCustomProvider(true);setForm(f=>({...f,provider:''}));return;}
+                    const prov=providersList.find(p=>p.name===val);
+                    setForm(f=>({...f,provider:val,model:(prov?.models||[])[0]||f.model}));
+                    setCustomModel(false);
+                  }}>
+                    ${providersList.length===0?html`<option value="">— Chưa có provider —</option>`:''}
+                    ${providersList.map(p=>html`<option key=${p.name} value=${p.name}>${p.icon||'🤖'} ${p.label||p.name} (${p.provider_type||''})</option>`)}
+                    <option value="__custom__">✏️ Nhập thủ công...</option>
+                  </select>
+                </div>
+              `}
+            </label>
+            <label>${t('set.model',lang)}
+              ${customModel ? html`
+                <div style="display:flex;gap:4px;margin-top:4px">
+                  <input style="${inp};flex:1;margin-top:0" value=${form.model} onInput=${e=>setForm(f=>({...f,model:e.target.value}))} placeholder="model-name" />
+                  <button class="btn btn-outline btn-sm" onClick=${()=>setCustomModel(false)} title="Chọn từ danh sách">📋</button>
+                </div>
+              ` : html`
+                <div style="display:flex;gap:4px;margin-top:4px">
+                  <select style="${inp};flex:1;margin-top:0;cursor:pointer" value=${form.model} onChange=${e=>{
+                    if(e.target.value==='__custom__'){setCustomModel(true);setForm(f=>({...f,model:''}));return;}
+                    setForm(f=>({...f,model:e.target.value}));
+                  }}>
+                    ${(()=>{
+                      const prov=providersList.find(p=>p.name===form.provider);
+                      const models=prov?.models||[];
+                      if(models.length===0) return html`<option value=${form.model||''}>${form.model||'— Chọn model —'}</option>`;
+                      return models.map(m=>html`<option key=${m} value=${m}>${m}</option>`);
+                    })()}
+                    <option value="__custom__">✏️ Nhập thủ công...</option>
+                  </select>
+                </div>
+              `}
+            </label>
             <label>${t('set.temperature',lang)}: ${form.temperature}<input type="range" min="0" max="2" step="0.1" value=${form.temperature} onInput=${e=>setForm(f=>({...f,temperature:+e.target.value}))} style="width:100%" /></label>
           </div>
         </div>
@@ -1150,7 +1245,7 @@ function ProvidersPage({ config, lang }) {
   </div>`;
 }
 
-// ═══ CHANNELS PAGE — Full rewrite with proper per-channel config ═══
+// ═══ CHANNELS PAGE — Multi-instance support with proper per-channel config ═══
 function ChannelsPage({ lang }) {
   const { showToast } = useContext(AppContext);
   const [channelData, setChannelData] = useState(null);
@@ -1160,24 +1255,27 @@ function ChannelsPage({ lang }) {
   const [chForm, setChForm] = useState({});
   const [zaloQr, setZaloQr] = useState(null);
   const [zaloLoading, setZaloLoading] = useState(false);
+  const [showAddNew, setShowAddNew] = useState(false);
+  const [newChType, setNewChType] = useState('');
+  const [newChName, setNewChName] = useState('');
   const inp = 'width:100%;padding:8px;margin-top:4px;background:var(--bg2);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px';
 
   // Channel definitions with proper field mappings
   const channelDefs = [
     {name:'cli',icon:'💻',label:'CLI Terminal',type:'interactive',alwaysActive:true},
-    {name:'telegram',icon:'📱',label:'Telegram Bot',type:'messaging',
+    {name:'telegram',icon:'📱',label:'Telegram Bot',type:'messaging',multi:true,
      fields:[{key:'bot_token',label:'Bot Token',secret:true},{key:'allowed_chat_ids',label:'Allowed Chat IDs',placeholder:'-100123, 987654'}]},
-    {name:'zalo',icon:'💙',label:'Zalo Personal',type:'messaging',hasQr:true,
+    {name:'zalo',icon:'💙',label:'Zalo Personal',type:'messaging',hasQr:true,multi:true,
      fields:[{key:'cookie',label:'Cookie (từ chat.zalo.me)',secret:true,textarea:true},{key:'imei',label:'IMEI (Device ID)',placeholder:'Tự tạo nếu để trống'}]},
-    {name:'discord',icon:'🎮',label:'Discord Bot',type:'messaging',
+    {name:'discord',icon:'🎮',label:'Discord Bot',type:'messaging',multi:true,
      fields:[{key:'bot_token',label:'Bot Token',secret:true},{key:'allowed_channel_ids',label:'Allowed Channel IDs',placeholder:'123456, 789012'}]},
-    {name:'email',icon:'📧',label:'Email (IMAP/SMTP)',type:'messaging',
+    {name:'email',icon:'📧',label:'Email (IMAP/SMTP)',type:'messaging',multi:true,
      fields:[{key:'smtp_host',label:'SMTP Host',placeholder:'smtp.gmail.com'},{key:'smtp_port',label:'SMTP Port',placeholder:'587'},
              {key:'smtp_user',label:'Email Address',placeholder:'bot@example.com'},{key:'smtp_pass',label:'App Password',secret:true},
              {key:'imap_host',label:'IMAP Host',placeholder:'imap.gmail.com'}]},
     {name:'whatsapp',icon:'💬',label:'WhatsApp Business',type:'messaging',
      fields:[{key:'phone_number_id',label:'Phone Number ID'},{key:'access_token',label:'Access Token',secret:true},{key:'business_id',label:'Business ID'}]},
-    {name:'webhook',icon:'🌐',label:'Webhook',type:'api',
+    {name:'webhook',icon:'🌐',label:'Webhook',type:'api',multi:true,
      fields:[{key:'webhook_url',label:'Outbound URL',placeholder:'https://example.com/webhook'},{key:'webhook_secret',label:'Secret',secret:true}]},
   ];
 
@@ -1205,22 +1303,95 @@ function ChannelsPage({ lang }) {
     return () => clearTimeout(t);
   }, []);
 
-  const getStatus = (name) => {
-    if(name === 'cli') return 'active';
-    const apiCh = apiChannels.find(c => c.name === name);
-    if(apiCh?.status === 'active') return 'active';
-    const cfgCh = channelData?.[name];
-    if(cfgCh?.enabled) return 'active';
-    if(cfgCh) return 'configured';
-    return 'available';
+  // Build a merged list of channel instances (from API + config)
+  const getChannelInstances = () => {
+    const instances = [];
+    // Always add CLI
+    instances.push({ key: 'cli', name: 'cli', type: 'cli', defName: 'cli', label: 'CLI Terminal', icon: '💻', status: 'active', channelType: 'interactive' });
+    // From API channels
+    for (const ac of apiChannels) {
+      const def = channelDefs.find(d => d.name === ac.channel_type || d.name === ac.name);
+      if (def && def.name !== 'cli') {
+        instances.push({
+          key: ac.id || ac.name,
+          name: ac.display_name || ac.name || def.label,
+          type: def.name,
+          defName: def.name,
+          label: ac.display_name || def.label,
+          icon: def.icon,
+          status: ac.status || (ac.enabled ? 'active' : 'configured'),
+          channelType: def.type,
+          config: ac,
+        });
+      }
+    }
+    // From config data (if not already in API channels)
+    for (const def of channelDefs) {
+      if (def.name === 'cli') continue;
+      const cfgCh = channelData?.[def.name];
+      if (cfgCh && !instances.find(i => i.defName === def.name)) {
+        instances.push({
+          key: def.name,
+          name: def.name,
+          type: def.name,
+          defName: def.name,
+          label: cfgCh.display_name || def.label,
+          icon: def.icon,
+          status: cfgCh.enabled ? 'active' : 'configured',
+          channelType: def.type,
+          config: cfgCh,
+        });
+      }
+    }
+    // From config data — multi instances (telegram_2, zalo_shop, etc.)
+    if (channelData) {
+      for (const [k, v] of Object.entries(channelData)) {
+        if (!instances.find(i => i.key === k)) {
+          const baseType = k.replace(/_\d+$/, '').replace(/_[a-z]+$/, '');
+          const def = channelDefs.find(d => d.name === baseType);
+          if (def) {
+            instances.push({
+              key: k,
+              name: k,
+              type: def.name,
+              defName: def.name,
+              label: v.display_name || k,
+              icon: def.icon,
+              status: v.enabled ? 'active' : 'configured',
+              channelType: def.type,
+              config: v,
+            });
+          }
+        }
+      }
+    }
+    // Add unconfigured channel types at the bottom
+    for (const def of channelDefs) {
+      if (def.name === 'cli') continue;
+      if (!instances.find(i => i.defName === def.name)) {
+        instances.push({
+          key: 'avail_' + def.name,
+          name: def.name,
+          type: def.name,
+          defName: def.name,
+          label: def.label,
+          icon: def.icon,
+          status: 'available',
+          channelType: def.type,
+        });
+      }
+    }
+    return instances;
   };
 
-  const openConfig = (def) => {
-    setConfigCh(def);
+  const openConfig = (inst) => {
+    const def = channelDefs.find(d => d.name === inst.defName);
+    if (!def || !def.fields) return;
+    setConfigCh({ ...def, instanceKey: inst.key, instanceLabel: inst.label });
     setZaloQr(null);
     // Pre-fill form from config data
-    const cfgCh = channelData?.[def.name] || {};
-    const f = { enabled: getStatus(def.name) === 'active' };
+    const cfgCh = inst.config || channelData?.[inst.key] || channelData?.[inst.defName] || {};
+    const f = { enabled: inst.status === 'active', display_name: inst.label || '' };
     (def.fields || []).forEach(fd => {
       f[fd.key] = cfgCh[fd.key] || '';
     });
@@ -1230,15 +1401,30 @@ function ChannelsPage({ lang }) {
   const saveChannelConfig = async () => {
     if(!configCh) return;
     try {
-      const body = { channel_type: configCh.name, enabled: chForm.enabled !== false, ...chForm };
+      const body = { channel_type: configCh.name, instance_key: configCh.instanceKey, enabled: chForm.enabled !== false, display_name: chForm.display_name, ...chForm };
       const r = await authFetch('/api/v1/channels/update', {
         method: 'POST', headers: {'Content-Type':'application/json'},
         body: JSON.stringify(body)
       });
       const d = await r.json();
-      if(d.ok) { showToast('✅ Đã cấu hình '+configCh.label,'success'); setConfigCh(null); load(); }
+      if(d.ok) { showToast('✅ Đã cấu hình '+configCh.instanceLabel,'success'); setConfigCh(null); load(); }
       else showToast('❌ '+(d.error||d.message||'Lỗi'),'error');
     } catch(e) { showToast('❌ '+e.message,'error'); }
+  };
+
+  const addNewChannel = async () => {
+    if (!newChType) { showToast('⚠️ Chọn loại kênh','error'); return; }
+    const def = channelDefs.find(d => d.name === newChType);
+    if (!def) return;
+    const instanceName = newChName.trim() || (newChType + '_' + Date.now().toString(36).slice(-4));
+    // Open config form for the new instance
+    setConfigCh({ ...def, instanceKey: instanceName, instanceLabel: (def.icon + ' ' + instanceName) });
+    const f = { enabled: true, display_name: newChName.trim() || def.label };
+    (def.fields || []).forEach(fd => { f[fd.key] = ''; });
+    setChForm(f);
+    setShowAddNew(false);
+    setNewChType('');
+    setNewChName('');
   };
 
   const loadZaloQr = async () => {
@@ -1260,21 +1446,49 @@ function ChannelsPage({ lang }) {
 
   if(loading) return html`<div class="card" style="text-align:center;padding:40px;color:var(--text2)">Đang tải kênh liên lạc...</div>`;
 
-  const activeCount = channelDefs.filter(d => getStatus(d.name)==='active').length;
-  const configuredCount = channelDefs.filter(d => getStatus(d.name)==='configured').length;
+  const allInstances = getChannelInstances();
+  const activeCount = allInstances.filter(i => i.status==='active').length;
+  const configuredCount = allInstances.filter(i => i.status==='configured').length;
+  const multiCapable = channelDefs.filter(d => d.multi);
 
   return html`<div>
-    <div class="page-header"><div><h1>📱 ${t('channels.title',lang)}</h1><div class="sub">${t('channels.subtitle',lang)} — ${channelDefs.length} kênh liên lạc</div></div></div>
+    <div class="page-header"><div><h1>📱 ${t('channels.title',lang)}</h1><div class="sub">${t('channels.subtitle',lang)} — Hỗ trợ nhiều instance mỗi loại</div></div>
+      <button class="btn" style="background:var(--grad1);color:#fff;padding:8px 18px" onClick=${()=>setShowAddNew(!showAddNew)}>+ Thêm kênh</button>
+    </div>
     <div class="stats">
-      <${StatsCard} label="Tổng kênh" value=${channelDefs.length} color="accent" icon="📱" />
+      <${StatsCard} label="Tổng kênh" value=${allInstances.length} color="accent" icon="📱" />
       <${StatsCard} label="Hoạt động" value=${activeCount} color="green" icon="✅" />
       <${StatsCard} label="Đã cấu hình" value=${configuredCount} color="blue" icon="🔧" />
     </div>
 
+    ${showAddNew && html`
+      <div class="card" style="margin-bottom:14px;border:1px solid var(--accent)">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+          <h3>➕ Thêm kênh liên lạc mới</h3>
+          <button class="btn btn-outline btn-sm" onClick=${()=>setShowAddNew(false)}>✕ Đóng</button>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;font-size:13px">
+          <label>Loại kênh
+            <select style="${inp};cursor:pointer" value=${newChType} onChange=${e=>setNewChType(e.target.value)}>
+              <option value="">— Chọn loại kênh —</option>
+              ${multiCapable.map(d => html`<option key=${d.name} value=${d.name}>${d.icon} ${d.label}</option>`)}
+            </select>
+          </label>
+          <label>Tên hiển thị (tuỳ chọn)
+            <input style="${inp}" value=${newChName} onInput=${e=>setNewChName(e.target.value)} placeholder="VD: Bot bán hàng, Zalo cá nhân 2..." />
+          </label>
+        </div>
+        <div style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end">
+          <button class="btn btn-outline" onClick=${()=>setShowAddNew(false)}>Huỷ</button>
+          <button class="btn" style="background:var(--grad1);color:#fff;padding:8px 20px" onClick=${addNewChannel}>➕ Tạo kênh</button>
+        </div>
+      </div>
+    `}
+
     ${configCh && html`
       <div class="card" style="margin-bottom:14px;border:1px solid var(--accent)">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
-          <h3 style="margin:0">${configCh.icon} Cấu hình ${configCh.label}</h3>
+          <h3 style="margin:0">${configCh.icon} Cấu hình ${configCh.instanceLabel}</h3>
           <button class="btn btn-outline btn-sm" onClick=${()=>setConfigCh(null)}>✕ Đóng</button>
         </div>
 
@@ -1284,6 +1498,12 @@ function ChannelsPage({ lang }) {
             <div style="position:absolute;top:2px;left:${chForm.enabled?'22px':'2px'};width:20px;height:20px;background:#fff;border-radius:50%;transition:left 0.3s;box-shadow:0 1px 3px rgba(0,0,0,0.3)"></div>
           </div>
           <span style="font-size:12px;color:${chForm.enabled?'var(--green)':'var(--text2)'}">${chForm.enabled?'Đang bật':'Đang tắt'}</span>
+        </div>
+
+        <div style="margin-bottom:10px">
+          <label style="font-size:13px">Tên hiển thị
+            <input style="${inp}" value=${chForm.display_name||''} onInput=${e=>setChForm(f=>({...f,display_name:e.target.value}))} placeholder="Tên tuỳ chỉnh cho kênh này" />
+          </label>
         </div>
 
         ${configCh.hasQr && html`
@@ -1318,16 +1538,16 @@ function ChannelsPage({ lang }) {
     `}
 
     <div class="card"><div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:10px">
-      ${channelDefs.map(def => {
-        const st = getStatus(def.name);
-        return html`<div key=${def.name} style="display:flex;align-items:center;gap:10px;padding:12px 14px;background:var(--bg2);border-radius:8px;border:1px solid ${st==='active'?'var(--green)':st==='configured'?'var(--accent)':'var(--border)'}">
-          <span style="font-size:24px">${def.icon}</span>
+      ${allInstances.map(inst => {
+        const def = channelDefs.find(d => d.name === inst.defName);
+        return html`<div key=${inst.key} style="display:flex;align-items:center;gap:10px;padding:12px 14px;background:var(--bg2);border-radius:8px;border:1px solid ${inst.status==='active'?'var(--green)':inst.status==='configured'?'var(--accent)':'var(--border)'}">
+          <span style="font-size:24px">${inst.icon}</span>
           <div style="flex:1">
-            <strong style="font-size:13px">${def.label}</strong>
-            <div style="font-size:11px;color:var(--text2)">${def.type}</div>
+            <strong style="font-size:13px">${inst.label}</strong>
+            <div style="font-size:11px;color:var(--text2)">${inst.channelType}${inst.key !== inst.defName ? html` • <span style="color:var(--accent)">${inst.defName}</span>` : ''}</div>
           </div>
-          ${statusBadge(st)}
-          ${def.fields && html`<button class="btn btn-outline btn-sm" onClick=${()=>openConfig(def)} title="Cấu hình">⚙️</button>`}
+          ${statusBadge(inst.status)}
+          ${def?.fields && html`<button class="btn btn-outline btn-sm" onClick=${()=>openConfig(inst)} title="Cấu hình">⚙️</button>`}
         </div>`;
       })}
     </div></div>
@@ -1490,32 +1710,69 @@ function AgentsPage({ config, lang }) {
   const [loading,setLoading] = useState(true);
   const [showForm,setShowForm] = useState(false);
   const [editAgent,setEditAgent] = useState(null);
-  const [form,setForm] = useState({name:'',role:'',description:'',system_prompt:'',provider:'',model:''});
+  const [form,setForm] = useState({name:'',role:'',description:'',system_prompt:'',provider:'',model:'',channels:[]});
+  const availableChannels = ['telegram','zalo','discord','webhook','web'];
+  const [providersList, setProvidersList] = useState([]);
+  const [customAgentProv, setCustomAgentProv] = useState(false);
+  const [customAgentModel, setCustomAgentModel] = useState(false);
 
   const load = async () => {
-    try { const r=await authFetch('/api/v1/agents');const d=await r.json();setAgents(d.agents||[]); } catch(e){ console.error('AgentsPage load error:', e); }
+    try {
+      const [agRes, provRes] = await Promise.all([
+        authFetch('/api/v1/agents'),
+        authFetch('/api/v1/providers'),
+      ]);
+      const agData = await agRes.json();
+      const provData = await provRes.json();
+      setAgents(agData.agents || []);
+      setProvidersList(provData.providers || []);
+    } catch(e){ console.error('AgentsPage load error:', e); }
     setLoading(false);
   };
   useEffect(()=>{ load(); },[]);
 
-  const openCreate = () => { setEditAgent(null); setForm({name:'',role:'general',description:'',system_prompt:'',provider:config?.default_provider||'',model:config?.default_model||''}); setShowForm(true); };
-  const openEdit = (a) => { setEditAgent(a); setForm({name:a.name,role:a.role||'',description:a.description||'',system_prompt:a.system_prompt||'',provider:a.provider||'',model:a.model||''}); setShowForm(true); };
+  const openCreate = () => { setEditAgent(null); setCustomAgentProv(false); setCustomAgentModel(false); setForm({name:'',role:'general',description:'',system_prompt:'',provider:config?.default_provider||'',model:config?.default_model||'',channels:[]}); setShowForm(true); };
+  const openEdit = (a) => {
+    setEditAgent(a);
+    setForm({name:a.name,role:a.role||'',description:a.description||'',system_prompt:a.system_prompt||'',provider:a.provider||'',model:a.model||'',channels:a.channels||[]});
+    // Check if provider/model exists in list
+    setCustomAgentProv(a.provider && !providersList.find(p => p.name === a.provider));
+    setCustomAgentModel(false);
+    setShowForm(true);
+  };
 
   const saveAgent = async () => {
     try {
+      const agentData = {name:form.name,role:form.role,description:form.description,system_prompt:form.system_prompt,provider:form.provider,model:form.model};
       if(editAgent) {
         const r = await authFetch('/api/v1/agents/'+encodeURIComponent(editAgent.name), {
-          method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(form)
+          method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(agentData)
         });
         const d=await r.json();
-        if(d.ok) { showToast('✅ Đã cập nhật agent: '+form.name,'success'); load(); setShowForm(false); }
+        if(d.ok) {
+          // Save channel bindings
+          if((form.channels||[]).length > 0 || (editAgent.channels||[]).length > 0) {
+            await authFetch('/api/v1/agents/'+encodeURIComponent(form.name)+'/channels', {
+              method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({channels:form.channels||[]})
+            });
+          }
+          showToast('✅ Đã cập nhật agent: '+form.name,'success'); load(); setShowForm(false);
+        }
         else showToast('❌ '+(d.error||'Lỗi'),'error');
       } else {
         const r = await authFetch('/api/v1/agents', {
-          method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(form)
+          method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(agentData)
         });
         const d=await r.json();
-        if(d.ok) { showToast('✅ Đã tạo agent: '+form.name,'success'); load(); setShowForm(false); }
+        if(d.ok) {
+          // Save channel bindings for new agent
+          if((form.channels||[]).length > 0) {
+            await authFetch('/api/v1/agents/'+encodeURIComponent(form.name)+'/channels', {
+              method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({channels:form.channels||[]})
+            });
+          }
+          showToast('✅ Đã tạo agent: '+form.name,'success'); load(); setShowForm(false);
+        }
         else showToast('❌ '+(d.error||'Lỗi'),'error');
       }
     } catch(e) { showToast('❌ '+e.message,'error'); }
@@ -1548,10 +1805,60 @@ function AgentsPage({ config, lang }) {
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;font-size:13px">
           <label>Tên Agent<input style="${inp}" value=${form.name} onInput=${e=>setForm(f=>({...f,name:e.target.value}))} placeholder="sales-bot" ${editAgent?'disabled':''} /></label>
           <label>Vai trò<input style="${inp}" value=${form.role} onInput=${e=>setForm(f=>({...f,role:e.target.value}))} placeholder="coder, writer, analyst..." /></label>
-          <label>Provider<input style="${inp}" value=${form.provider} onInput=${e=>setForm(f=>({...f,provider:e.target.value}))} placeholder="ollama, openai..." /></label>
-          <label>Model<input style="${inp}" value=${form.model} onInput=${e=>setForm(f=>({...f,model:e.target.value}))} placeholder="llama3.2, gpt-4o..." /></label>
+          <label>Provider
+            ${customAgentProv ? html`
+              <div style="display:flex;gap:4px;margin-top:4px">
+                <input style="${inp};flex:1;margin-top:0" value=${form.provider} onInput=${e=>setForm(f=>({...f,provider:e.target.value}))} placeholder="custom-provider" />
+                <button class="btn btn-outline btn-sm" onClick=${()=>{setCustomAgentProv(false);if(providersList.length)setForm(f=>({...f,provider:providersList[0].name,model:(providersList[0].models||[])[0]||''}))}} title="Chọn từ danh sách">📋</button>
+              </div>
+            ` : html`
+              <select style="${inp};cursor:pointer" value=${form.provider} onChange=${e=>{
+                if(e.target.value==='__custom__'){setCustomAgentProv(true);setForm(f=>({...f,provider:''}));return;}
+                const prov=providersList.find(p=>p.name===e.target.value);
+                setForm(f=>({...f,provider:e.target.value,model:(prov?.models||[])[0]||f.model}));
+                setCustomAgentModel(false);
+              }}>
+                <option value="">— Chọn Provider —</option>
+                ${providersList.map(p=>html`<option key=${p.name} value=${p.name}>${p.icon||'🤖'} ${p.label||p.name}</option>`)}
+                <option value="__custom__">✏️ Nhập thủ công...</option>
+              </select>
+            `}
+          </label>
+          <label>Model
+            ${customAgentModel ? html`
+              <div style="display:flex;gap:4px;margin-top:4px">
+                <input style="${inp};flex:1;margin-top:0" value=${form.model} onInput=${e=>setForm(f=>({...f,model:e.target.value}))} placeholder="model-name" />
+                <button class="btn btn-outline btn-sm" onClick=${()=>setCustomAgentModel(false)} title="Chọn từ danh sách">📋</button>
+              </div>
+            ` : html`
+              <select style="${inp};cursor:pointer" value=${form.model} onChange=${e=>{
+                if(e.target.value==='__custom__'){setCustomAgentModel(true);setForm(f=>({...f,model:''}));return;}
+                setForm(f=>({...f,model:e.target.value}));
+              }}>
+                <option value="">— Chọn Model —</option>
+                ${(()=>{
+                  const prov=providersList.find(p=>p.name===form.provider);
+                  return (prov?.models||[]).map(m=>html`<option key=${m} value=${m}>${m}</option>`);
+                })()}
+                <option value="__custom__">✏️ Nhập thủ công...</option>
+              </select>
+            `}
+          </label>
           <label style="grid-column:span 2">Mô tả<input style="${inp}" value=${form.description} onInput=${e=>setForm(f=>({...f,description:e.target.value}))} placeholder="Mô tả ngắn..." /></label>
           <label style="grid-column:span 2">System Prompt<textarea style="${inp};min-height:80px;resize:vertical;font-family:var(--mono)" value=${form.system_prompt} onInput=${e=>setForm(f=>({...f,system_prompt:e.target.value}))} placeholder="You are a..." /></label>
+          <label style="grid-column:span 2">📡 Gán Agent với Kênh
+            <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px">
+              ${availableChannels.map(ch => {
+                const icons = {telegram:'📱',zalo:'💙',discord:'💬',webhook:'🌐',web:'🖥️'};
+                const labels = {telegram:'Telegram',zalo:'Zalo',discord:'Discord',webhook:'Webhook',web:'Web Chat'};
+                const active = (form.channels||[]).includes(ch);
+                return html`<button key=${ch} type="button" class="btn btn-sm ${active?'':'btn-outline'}" style="${active?'background:var(--accent);color:#fff;border-color:var(--accent)':''}" onClick=${()=>{
+                  setForm(f => ({...f, channels: active ? (f.channels||[]).filter(c=>c!==ch) : [...(f.channels||[]),ch]}));
+                }}>${icons[ch]||'📡'} ${labels[ch]||ch}</button>`;
+              })}
+            </div>
+            <div style="font-size:10px;color:var(--text2);margin-top:4px">Chọn kênh mà agent này sẽ tự động trả lời. Có thể chọn nhiều kênh.</div>
+          </label>
         </div>
         <div style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end">
           <button class="btn btn-outline" onClick=${()=>setShowForm(false)}>Huỷ</button>
@@ -1561,12 +1868,13 @@ function AgentsPage({ config, lang }) {
     `}
 
     <div class="card">${loading?html`<div style="text-align:center;padding:20px;color:var(--text2)">Loading...</div>`:agents.length===0?html`<div style="text-align:center;padding:30px;color:var(--text2)"><div style="font-size:48px;margin-bottom:12px">🤖</div><p>Default agent: <strong>${config?.agent_name||'BizClaw'}</strong></p><p style="margin-top:8px">Provider: <span class="badge badge-blue">${config?.default_provider||'—'}</span></p></div>`:html`
-      <table><thead><tr><th>Agent</th><th>Vai trò</th><th>Provider</th><th>Model</th><th>Messages</th><th>Status</th><th style="text-align:right">Thao tác</th></tr></thead><tbody>
+      <table><thead><tr><th>Agent</th><th>Vai trò</th><th>Provider</th><th>Model</th><th>Channels</th><th>Messages</th><th>Status</th><th style="text-align:right">Thao tác</th></tr></thead><tbody>
         ${agents.map(a=>html`<tr key=${a.name||a.id}>
           <td><strong>${a.name}</strong>${a.description?html`<div style="font-size:11px;color:var(--text2)">${a.description}</div>`:''}</td>
           <td><span class="badge">${a.role||'—'}</span></td>
           <td>${a.provider||'—'}</td>
           <td><span class="badge badge-blue">${a.model||'—'}</span></td>
+          <td>${(a.channels||[]).length>0 ? (a.channels||[]).map(ch=>html`<span key=${ch} class="badge" style="margin-right:2px;font-size:10px">${{telegram:'📱',zalo:'💙',discord:'💬',webhook:'🌐',web:'🖥️'}[ch]||'📡'} ${ch}</span>`) : html`<span style="color:var(--text2);font-size:11px">—</span>`}</td>
           <td>${a.message_count||a.messages_processed||0}</td>
           <td><span class="badge badge-green">Active</span></td>
           <td style="text-align:right;white-space:nowrap">
@@ -1745,11 +2053,20 @@ function OrchestrationPage({ lang }) {
   const { showToast } = useContext(AppContext);
   const [delegations,setDelegations] = useState([]);
   const [links,setLinks] = useState([]);
+  const [agentsList, setAgentsList] = useState([]);
   const [showCreate,setShowCreate] = useState(false);
   const [form,setForm] = useState({from:'',to:'',task:''});
 
   const load = async () => {
-    try{const [r1,r2]=await Promise.all([authFetch('/api/v1/orchestration/delegations'),authFetch('/api/v1/orchestration/links')]);const d1=await r1.json();const d2=await r2.json();setDelegations(d1.delegations||[]);setLinks(d2.links||[]);}catch(e){}
+    try{
+      const [r1,r2,r3]=await Promise.all([
+        authFetch('/api/v1/orchestration/delegations'),
+        authFetch('/api/v1/orchestration/links'),
+        authFetch('/api/v1/agents'),
+      ]);
+      const d1=await r1.json();const d2=await r2.json();const d3=await r3.json();
+      setDelegations(d1.delegations||[]);setLinks(d2.links||[]);setAgentsList(d3.agents||[]);
+    }catch(e){}
   };
   useEffect(()=>{ load(); },[]);
 
@@ -1778,8 +2095,18 @@ function OrchestrationPage({ lang }) {
     ${showCreate && html`<div class="card" style="margin-bottom:14px;border:1px solid var(--accent)">
       <h3 style="margin-bottom:10px">📋 Tạo Delegation mới</h3>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;font-size:13px">
-        <label>From Agent<input style="${inp}" value=${form.from} onInput=${e=>setForm(f=>({...f,from:e.target.value}))} placeholder="main-agent" /></label>
-        <label>To Agent<input style="${inp}" value=${form.to} onInput=${e=>setForm(f=>({...f,to:e.target.value}))} placeholder="research-agent" /></label>
+        <label>From Agent
+          <select style="${inp};cursor:pointer" value=${form.from} onChange=${e=>setForm(f=>({...f,from:e.target.value}))}>
+            <option value="">— Chọn Agent —</option>
+            ${agentsList.map(a=>html`<option key=${a.name} value=${a.name}>🤖 ${a.name} ${a.role ? '('+a.role+')' : ''}</option>`)}
+          </select>
+        </label>
+        <label>To Agent
+          <select style="${inp};cursor:pointer" value=${form.to} onChange=${e=>setForm(f=>({...f,to:e.target.value}))}>
+            <option value="">— Chọn Agent —</option>
+            ${agentsList.filter(a=>a.name!==form.from).map(a=>html`<option key=${a.name} value=${a.name}>🤖 ${a.name} ${a.role ? '('+a.role+')' : ''}</option>`)}
+          </select>
+        </label>
         <label style="grid-column:span 2">Task<input style="${inp}" value=${form.task} onInput=${e=>setForm(f=>({...f,task:e.target.value}))} placeholder="Research topic X and report" /></label>
       </div>
       <div style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end">
@@ -2281,49 +2608,27 @@ function WorkflowsPage({ lang }) {
   const [workflows, setWorkflows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [selectedWf, setSelectedWf] = useState(null);
+  const [showForm, setShowForm] = useState(false);
+  const [editWf, setEditWf] = useState(null);
+  const [form, setForm] = useState({name:'',description:'',tags:'',steps:[{name:'',type:'Sequential',agent_role:'',prompt:''}]});
+  const [runResult, setRunResult] = useState(null);
+  const [running, setRunning] = useState(null);
+  const [runInput, setRunInput] = useState('');
+  const [showRunInput, setShowRunInput] = useState(null);
 
-  useEffect(() => {
-    (async () => {
-      try {
-        const r = await authFetch('/api/v1/workflows');
-        const d = await r.json();
-        setWorkflows(d.workflows || []);
-      } catch (e) {
-        // Use built-in templates as fallback
-        setWorkflows([
-          { id: 'content_pipeline', name: 'Content Pipeline', description: t('wf.content_desc', lang), tags: ['content','writing'], steps: [
-            { name: 'Draft', type: 'Sequential', agent_role: 'Writer' },
-            { name: 'Review', type: 'Sequential', agent_role: 'Editor' },
-            { name: 'Polish', type: 'Sequential', agent_role: 'Proofreader' },
-          ]},
-          { id: 'expert_consensus', name: 'Expert Consensus', description: t('wf.expert_desc', lang), tags: ['analysis','multi-agent'], steps: [
-            { name: 'Expert Analysis', type: 'FanOut', agent_role: '3 Experts (parallel)' },
-            { name: 'Merge Results', type: 'Collect', agent_role: 'Synthesizer' },
-          ]},
-          { id: 'quality_pipeline', name: 'Quality Gate', description: t('wf.quality_desc', lang), tags: ['quality','loop'], steps: [
-            { name: 'Generate', type: 'Sequential', agent_role: 'Creator' },
-            { name: 'Evaluate', type: 'Loop', agent_role: 'Evaluator (until APPROVED)' },
-          ]},
-          { id: 'research_pipeline', name: 'Research Pipeline', description: t('wf.research_desc', lang), tags: ['research','data'], steps: [
-            { name: 'Search', type: 'Sequential', agent_role: 'Researcher' },
-            { name: 'Analyze', type: 'Sequential', agent_role: 'Analyst' },
-            { name: 'Synthesize', type: 'Sequential', agent_role: 'Writer' },
-            { name: 'Report', type: 'Transform', agent_role: 'Formatter' },
-          ]},
-          { id: 'translation_pipeline', name: 'Translation Pipeline', description: t('wf.translate_desc', lang), tags: ['language','translation'], steps: [
-            { name: 'Translate', type: 'Sequential', agent_role: 'Translator' },
-            { name: 'Verify Quality', type: 'Conditional', agent_role: 'QA Checker' },
-          ]},
-          { id: 'code_review', name: 'Code Review Pipeline', description: t('wf.codereview_desc', lang), tags: ['code','security'], steps: [
-            { name: 'Code Analysis', type: 'FanOut', agent_role: '3 Reviewers (parallel)' },
-            { name: 'Security Check', type: 'Sequential', agent_role: 'Security Auditor' },
-            { name: 'Summary', type: 'Collect', agent_role: 'Lead Reviewer' },
-          ]},
-        ]);
-      }
-      setLoading(false);
-    })();
-  }, []);
+  const load = async () => {
+    try {
+      const r = await authFetch('/api/v1/workflows');
+      if(!r.ok) throw new Error('HTTP '+r.status);
+      const d = await r.json();
+      setWorkflows(d.workflows || []);
+    } catch (e) {
+      console.error('Workflows load:', e);
+      setWorkflows([]);
+    }
+    setLoading(false);
+  };
+  useEffect(() => { load(); }, []);
 
   const stepTypeIcon = (type) => {
     const icons = { Sequential: '➡️', FanOut: '🔀', Collect: '📥', Conditional: '🔀', Loop: '🔁', Transform: '✨' };
@@ -2333,38 +2638,186 @@ function WorkflowsPage({ lang }) {
     const colors = { Sequential: 'badge-blue', FanOut: 'badge-purple', Collect: 'badge-green', Conditional: 'badge-orange', Loop: 'badge-yellow', Transform: 'badge-blue' };
     return colors[type] || 'badge-blue';
   };
+  const stepTypes = ['Sequential','FanOut','Collect','Conditional','Loop','Transform'];
+
+  const openCreate = () => {
+    setEditWf(null);
+    setForm({name:'',description:'',tags:'',steps:[{name:'Step 1',type:'Sequential',agent_role:'',prompt:''}]});
+    setShowForm(true);
+  };
+  const openEdit = (wf) => {
+    if(wf.builtin) { showToast('ℹ️ Template mẫu không chỉnh sửa được. Hãy tạo workflow mới.','info'); return; }
+    setEditWf(wf);
+    setForm({
+      name: wf.name||'',
+      description: wf.description||'',
+      tags: (wf.tags||[]).join(', '),
+      steps: (wf.steps||[]).map(s=>({name:s.name||'',type:s.type||'Sequential',agent_role:s.agent_role||'',prompt:s.prompt||''})),
+    });
+    setShowForm(true);
+  };
+
+  const addStep = () => setForm(f=>({...f, steps:[...f.steps, {name:'Step '+(f.steps.length+1),type:'Sequential',agent_role:'',prompt:''}]}));
+  const removeStep = (idx) => setForm(f=>({...f, steps:f.steps.filter((_,i)=>i!==idx)}));
+  const updateStep = (idx, key, val) => setForm(f=>({...f, steps:f.steps.map((s,i)=>i===idx?{...s,[key]:val}:s)}));
+
+  const saveWorkflow = async () => {
+    if(!form.name.trim()) { showToast('⚠️ Nhập tên workflow','error'); return; }
+    if(form.steps.length===0) { showToast('⚠️ Thêm ít nhất 1 step','error'); return; }
+    const body = {
+      name: form.name,
+      description: form.description,
+      tags: form.tags.split(',').map(t=>t.trim()).filter(Boolean),
+      steps: form.steps,
+    };
+    try {
+      if(editWf && editWf.id) {
+        const r = await authFetch('/api/v1/workflows/'+encodeURIComponent(editWf.id), {
+          method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)
+        });
+        if(!r.ok) throw new Error('HTTP '+r.status);
+        const d = await r.json();
+        if(d.ok) { showToast('✅ Đã cập nhật: '+form.name,'success'); setShowForm(false); load(); }
+        else showToast('❌ '+(d.error||'Lỗi'),'error');
+      } else {
+        const r = await authFetch('/api/v1/workflows', {
+          method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)
+        });
+        if(!r.ok) throw new Error('HTTP '+r.status);
+        const d = await r.json();
+        if(d.ok) { showToast('✅ Đã tạo: '+form.name,'success'); setShowForm(false); load(); }
+        else showToast('❌ '+(d.error||'Lỗi'),'error');
+      }
+    } catch(e) { showToast('❌ '+e.message,'error'); }
+  };
 
   const runWorkflow = async (wf) => {
+    setRunning(wf.id);
+    setRunResult(null);
     try {
-      const r = await authFetch('/api/v1/workflows/run', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({workflow_id:wf.id, input:''})});
-      const d=await r.json();
-      if(d.ok) showToast('▶ Running: '+wf.name,'success');
+      const r = await authFetch('/api/v1/workflows/run', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({workflow_id:wf.id, input:runInput})
+      });
+      if(!r.ok) throw new Error('HTTP '+r.status);
+      const d = await r.json();
+      if(d.ok) {
+        showToast('✅ Hoàn thành: '+wf.name+' ('+d.steps_completed+' steps)','success');
+        setRunResult(d);
+        setShowRunInput(null);
+      } else {
+        showToast('❌ '+(d.error||'Lỗi'),'error');
+      }
+    } catch(e) { showToast('❌ '+e.message,'error'); }
+    setRunning(null);
+  };
+
+  const deleteWorkflow = async (wf) => {
+    if(wf.builtin) { showToast('ℹ️ Không thể xoá template mẫu','info'); return; }
+    if(!confirm('Xoá workflow "'+wf.name+'"?')) return;
+    try {
+      const r = await authFetch('/api/v1/workflows/'+encodeURIComponent(wf.id), {method:'DELETE'});
+      if(!r.ok) throw new Error('HTTP '+r.status);
+      const d = await r.json();
+      if(d.ok) { showToast('🗑️ Đã xoá: '+wf.name,'success'); load(); }
       else showToast('❌ '+(d.error||'Lỗi'),'error');
     } catch(e) { showToast('❌ '+e.message,'error'); }
   };
 
-  const deleteWorkflow = async (wf) => {
-    if(!confirm('Xoá workflow "'+wf.name+'"?')) return;
-    try {
-      await authFetch('/api/v1/workflows/'+wf.id, {method:'DELETE'});
-      showToast('🗑️ Đã xoá: '+wf.name,'success');
-      setWorkflows(prev => prev.filter(w => w.id !== wf.id));
-    } catch(e) { showToast('❌ '+e.message,'error'); }
-  };
+  const inp = 'width:100%;padding:8px;margin-top:4px;background:var(--bg2);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px';
 
   return html`<div>
     <div class="page-header"><div>
       <h1>🔄 ${t('wf.title', lang)}</h1>
       <div class="sub">${t('wf.subtitle', lang)}</div>
-    </div></div>
+    </div>
+      <button class="btn" style="background:var(--grad1);color:#fff;padding:8px 18px" onClick=${openCreate}>+ Tạo Workflow</button>
+    </div>
 
     <div class="stats">
       <${StatsCard} label=${t('wf.total', lang)} value=${workflows.length} color="accent" icon="🔄" />
-      <${StatsCard} label=${t('wf.step_types', lang)} value="6" color="blue" icon="⚙️" />
-      <${StatsCard} label=${t('wf.templates', lang)} value=${workflows.length} color="green" icon="📋" />
+      <${StatsCard} label="Custom" value=${workflows.filter(w=>!w.builtin).length} color="green" icon="✨" />
+      <${StatsCard} label=${t('wf.templates', lang)} value=${workflows.filter(w=>w.builtin).length} color="blue" icon="📋" />
     </div>
 
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+    ${showForm && html`
+      <div class="card" style="margin-bottom:14px;border:1px solid var(--accent)">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+          <h3>${editWf ? '✏️ Sửa: '+editWf.name : '➕ Tạo Workflow mới'}</h3>
+          <button class="btn btn-outline btn-sm" onClick=${()=>setShowForm(false)}>✕ Đóng</button>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;font-size:13px">
+          <label>Tên Workflow<input style="${inp}" value=${form.name} onInput=${e=>setForm(f=>({...f,name:e.target.value}))} placeholder="My Workflow" /></label>
+          <label>Tags (phân cách bằng dấu phẩy)<input style="${inp}" value=${form.tags} onInput=${e=>setForm(f=>({...f,tags:e.target.value}))} placeholder="content, writing" /></label>
+          <label style="grid-column:span 2">Mô tả<input style="${inp}" value=${form.description} onInput=${e=>setForm(f=>({...f,description:e.target.value}))} placeholder="Mô tả ngắn..." /></label>
+        </div>
+
+        <h4 style="margin-top:14px;margin-bottom:8px">📋 Steps (${form.steps.length})</h4>
+        <div style="display:grid;gap:8px">
+          ${form.steps.map((step, idx) => html`
+            <div key=${idx} style="padding:10px;background:var(--bg2);border-radius:8px;border:1px solid var(--border)">
+              <div style="display:grid;grid-template-columns:1fr 140px 1fr auto;gap:8px;align-items:end;font-size:12px">
+                <label>Step Name<input style="${inp}" value=${step.name} onInput=${e=>updateStep(idx,'name',e.target.value)} placeholder="Step name" /></label>
+                <label>Type
+                  <select style="${inp};cursor:pointer" value=${step.type} onChange=${e=>updateStep(idx,'type',e.target.value)}>
+                    ${stepTypes.map(t=>html`<option key=${t} value=${t}>${stepTypeIcon(t)} ${t}</option>`)}
+                  </select>
+                </label>
+                <label>Agent Role<input style="${inp}" value=${step.agent_role} onInput=${e=>updateStep(idx,'agent_role',e.target.value)} placeholder="Writer, Analyst..." /></label>
+                <button class="btn btn-outline btn-sm" style="color:var(--red);margin-bottom:2px" onClick=${()=>removeStep(idx)} title="Xoá step">🗑️</button>
+              </div>
+              <label style="display:block;margin-top:6px;font-size:12px">Prompt (tuỳ chọn)<input style="${inp}" value=${step.prompt||''} onInput=${e=>updateStep(idx,'prompt',e.target.value)} placeholder="Custom prompt cho step này (để trống = auto-generate)" /></label>
+            </div>
+          `)}
+        </div>
+        <button class="btn btn-outline btn-sm" style="margin-top:8px" onClick=${addStep}>+ Thêm Step</button>
+
+        <div style="margin-top:14px;display:flex;gap:8px;justify-content:flex-end">
+          <button class="btn btn-outline" onClick=${()=>setShowForm(false)}>Huỷ</button>
+          <button class="btn" style="background:var(--grad1);color:#fff;padding:8px 20px" onClick=${saveWorkflow}>💾 ${editWf?'Cập nhật':'Tạo'}</button>
+        </div>
+      </div>
+    `}
+
+    ${showRunInput && html`
+      <div class="card" style="margin-bottom:14px;border:1px solid var(--green)">
+        <h3 style="margin-bottom:8px">▶ Chạy: ${showRunInput.name}</h3>
+        <label style="font-size:13px">Input (context đầu vào cho workflow)
+          <textarea style="${inp};min-height:60px;resize:vertical" value=${runInput} onInput=${e=>setRunInput(e.target.value)} placeholder="Nhập nội dung/yêu cầu cho workflow xử lý..." />
+        </label>
+        <div style="margin-top:10px;display:flex;gap:8px;justify-content:flex-end">
+          <button class="btn btn-outline" onClick=${()=>{setShowRunInput(null);setRunInput('');}}>Huỷ</button>
+          <button class="btn" style="background:var(--green);color:#fff;padding:8px 20px" onClick=${()=>runWorkflow(showRunInput)} disabled=${running}>
+            ${running ? '⏳ Đang chạy...' : '▶ Chạy'}
+          </button>
+        </div>
+      </div>
+    `}
+
+    ${runResult && html`
+      <div class="card" style="margin-bottom:14px;border:1px solid var(--green)">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+          <h3>✅ Kết quả: ${runResult.workflow} (${runResult.steps_completed} steps)</h3>
+          <button class="btn btn-outline btn-sm" onClick=${()=>setRunResult(null)}>✕ Đóng</button>
+        </div>
+        ${(runResult.results||[]).map(r => html`
+          <div key=${r.step} style="padding:10px;margin-bottom:8px;background:var(--bg2);border-radius:8px;border-left:3px solid var(--accent)">
+            <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
+              <span class="badge badge-blue">Step ${r.step}</span>
+              <strong>${r.name}</strong>
+              <span style="color:var(--text2);font-size:11px">→ ${r.agent_role}</span>
+            </div>
+            <pre style="font-size:12px;white-space:pre-wrap;background:var(--bg);padding:8px;border-radius:4px;margin:0;max-height:200px;overflow-y:auto">${r.output}</pre>
+          </div>
+        `)}
+        <div style="margin-top:10px;padding:10px;background:var(--bg2);border-radius:8px;border-left:3px solid var(--green)">
+          <strong>📋 Final Output:</strong>
+          <pre style="font-size:12px;white-space:pre-wrap;margin-top:6px;max-height:200px;overflow-y:auto">${runResult.final_output}</pre>
+        </div>
+      </div>
+    `}
+
+    <div style="display:grid;grid-template-columns:1fr 2fr;gap:14px">
       <div class="card">
         <h3 style="margin-bottom:12px">⚙️ ${t('wf.step_types', lang)}</h3>
         <div style="display:grid;gap:6px">
@@ -2379,16 +2832,20 @@ function WorkflowsPage({ lang }) {
       </div>
 
       <div class="card">
-        <h3 style="margin-bottom:12px">📋 ${t('wf.templates', lang)}</h3>
+        <h3 style="margin-bottom:12px">📋 Workflows (${workflows.length})</h3>
         ${loading ? html`<div style="text-align:center;padding:20px;color:var(--text2)">Loading...</div>` : html`
           <div style="display:grid;gap:8px">
             ${workflows.map(wf => html`<div key=${wf.id} style="padding:12px;background:var(--bg2);border-radius:8px;border:1px solid ${selectedWf===wf.id?'var(--accent)':'var(--border)'};cursor:pointer" onClick=${()=>setSelectedWf(selectedWf===wf.id?null:wf.id)}>
               <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
-                <strong style="font-size:14px">${wf.name}</strong>
+                <div style="display:flex;align-items:center;gap:6px">
+                  <strong style="font-size:14px">${wf.name}</strong>
+                  ${wf.builtin ? html`<span class="badge" style="font-size:9px;opacity:0.6">built-in</span>` : html`<span class="badge badge-green" style="font-size:9px">custom</span>`}
+                </div>
                 <div style="display:flex;gap:4px;align-items:center">
                   ${(wf.tags||[]).map(tag=>html`<span key=${tag} class="badge" style="font-size:10px">${tag}</span>`)}
-                  <button class="btn btn-outline btn-sm" onClick=${(e)=>{e.stopPropagation();runWorkflow(wf);}} title="Run">▶</button>
-                  <button class="btn btn-outline btn-sm" style="color:var(--red)" onClick=${(e)=>{e.stopPropagation();deleteWorkflow(wf);}} title="Xoá">🗑️</button>
+                  <button class="btn btn-outline btn-sm" onClick=${(e)=>{e.stopPropagation();setShowRunInput(wf);setRunInput('');}} title="Chạy" disabled=${!!running}>▶</button>
+                  ${!wf.builtin && html`<button class="btn btn-outline btn-sm" onClick=${(e)=>{e.stopPropagation();openEdit(wf);}} title="Sửa">✏️</button>`}
+                  ${!wf.builtin && html`<button class="btn btn-outline btn-sm" style="color:var(--red)" onClick=${(e)=>{e.stopPropagation();deleteWorkflow(wf);}} title="Xoá">🗑️</button>`}
                 </div>
               </div>
               <div style="font-size:12px;color:var(--text2);margin-bottom:8px">${wf.description}</div>
@@ -2694,16 +3151,12 @@ export function App() {
           if (cancelled) { socket.close(); return; }
           reconnectAttempts = 0;
           setWsStatus('connected');
-          const el = document.getElementById('ws-status-indicator');
-          if (el) { const _l = localStorage.getItem('bizclaw_lang') || 'vi'; el.textContent = '🟢 ' + t('status.connected', _l); }
           pingTimer = setInterval(() => {
             if (socket.readyState === 1) socket.send(JSON.stringify({ type: 'ping' }));
           }, 25000);
         };
         socket.onclose = (ev) => {
           setWsStatus('disconnected');
-          const el = document.getElementById('ws-status-indicator');
-          if (el) { const _l = localStorage.getItem('bizclaw_lang') || 'vi'; el.textContent = '🔴 ' + t('status.disconnected', _l); }
           if (pingTimer) { clearInterval(pingTimer); pingTimer = null; }
           if (!cancelled) {
             reconnectAttempts++;
