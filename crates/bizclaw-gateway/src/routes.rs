@@ -4578,3 +4578,172 @@ pub async fn clear_activity(
     Json(serde_json::json!({"ok": true, "cleared": count}))
 }
 
+// ═══ PaaS: API Key Management ═══
+
+/// POST /api/v1/api-keys — Create a new API key
+pub async fn create_api_key(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    let name = body["name"].as_str().unwrap_or("Unnamed Key");
+    let scopes = body["scopes"].as_str().unwrap_or("read,write");
+    let expires_days = body["expires_days"].as_i64();
+
+    match state.db.create_api_key(name, scopes, expires_days) {
+        Ok((id, raw_key)) => {
+            tracing::info!("🔑 API key created: {} ({})", name, &raw_key[..10]);
+            // Track usage
+            let _ = state.db.track_usage("api_keys_created", 1.0);
+            Json(serde_json::json!({
+                "ok": true,
+                "id": id,
+                "key": raw_key,
+                "message": "API key created. Save this key — it won't be shown again!"
+            }))
+        }
+        Err(e) => Json(serde_json::json!({"ok": false, "error": e})),
+    }
+}
+
+/// GET /api/v1/api-keys — List all API keys
+pub async fn list_api_keys(
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    match state.db.list_api_keys() {
+        Ok(keys) => Json(serde_json::json!({"ok": true, "keys": keys, "count": keys.len()})),
+        Err(e) => Json(serde_json::json!({"ok": false, "error": e})),
+    }
+}
+
+/// DELETE /api/v1/api-keys/:id — Revoke an API key
+pub async fn revoke_api_key(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Json<serde_json::Value> {
+    match state.db.revoke_api_key(&id) {
+        Ok(true) => {
+            tracing::info!("🗑️ API key revoked: {}", id);
+            Json(serde_json::json!({"ok": true, "message": "Key revoked"}))
+        }
+        Ok(false) => Json(serde_json::json!({"ok": false, "error": "Key not found"})),
+        Err(e) => Json(serde_json::json!({"ok": false, "error": e})),
+    }
+}
+
+// ═══ PaaS: Usage & Quotas ═══
+
+/// GET /api/v1/usage — Current month usage summary
+pub async fn get_usage(
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    let usage = state.db.get_monthly_usage().unwrap_or_default();
+    let limits = state.db.get_plan_limits().unwrap_or_default();
+    // Also include real-time stats
+    let traces_count = state.traces.lock().map(|t| t.len()).unwrap_or(0);
+    let agents_count = {
+        let orch = state.orchestrator.lock().await;
+        orch.list_agents().len()
+    };
+    Json(serde_json::json!({
+        "ok": true,
+        "usage": usage,
+        "limits": limits,
+        "realtime": {
+            "active_agents": agents_count,
+            "traces_in_memory": traces_count,
+        }
+    }))
+}
+
+/// GET /api/v1/usage/daily?days=30 — Daily usage breakdown
+pub async fn get_usage_daily(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Json<serde_json::Value> {
+    let days = params.get("days").and_then(|d| d.parse::<i64>().ok()).unwrap_or(30);
+    match state.db.get_daily_usage(days) {
+        Ok(data) => Json(serde_json::json!({"ok": true, "data": data, "days": days})),
+        Err(e) => Json(serde_json::json!({"ok": false, "error": e})),
+    }
+}
+
+/// GET /api/v1/usage/limits — Current plan limits
+pub async fn get_plan_limits(
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    match state.db.get_plan_limits() {
+        Ok(limits) => Json(serde_json::json!({"ok": true, "limits": limits})),
+        Err(e) => Json(serde_json::json!({"ok": false, "error": e})),
+    }
+}
+
+/// PUT /api/v1/usage/limits — Update plan limits
+pub async fn update_plan_limits(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    if let Some(obj) = body.as_object() {
+        for (key, val) in obj {
+            if let Some(v) = val.as_i64() {
+                let _ = state.db.set_plan_limit(key, v);
+            }
+        }
+        tracing::info!("📊 Plan limits updated");
+        Json(serde_json::json!({"ok": true, "message": "Limits updated"}))
+    } else {
+        Json(serde_json::json!({"ok": false, "error": "Expected JSON object"}))
+    }
+}
+
+// ═══ PaaS: System Metrics ═══
+
+/// GET /api/v1/metrics — System metrics for dashboard
+pub async fn get_system_metrics(
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    // Agent count
+    let agents_count = {
+        let orch = state.orchestrator.lock().await;
+        orch.list_agents().len()
+    };
+    // Provider count
+    let providers = state.db.list_providers("").map(|p| p.len()).unwrap_or(0);
+    let active_providers = state.db.list_providers("")
+        .map(|p| p.iter().filter(|x| x.is_active).count()).unwrap_or(0);
+    // API keys
+    let api_keys = state.db.list_api_keys().map(|k| k.len()).unwrap_or(0);
+    // Traces stats
+    let (traces_count, total_tokens, total_cost) = {
+        let traces = state.traces.lock().unwrap();
+        let count = traces.len();
+        let tokens: i64 = traces.iter().map(|t| t.total_tokens as i64).sum();
+        let cost: f64 = traces.iter().map(|t| t.cost_usd).sum();
+        (count, tokens, cost)
+    };
+    // Usage this month
+    let monthly = state.db.get_monthly_usage().unwrap_or_default();
+    let limits = state.db.get_plan_limits().unwrap_or_default();
+    // Uptime
+    let uptime_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    Json(serde_json::json!({
+        "ok": true,
+        "metrics": {
+            "agents": agents_count,
+            "providers": providers,
+            "active_providers": active_providers,
+            "api_keys": api_keys,
+            "traces_session": traces_count,
+            "tokens_session": total_tokens,
+            "cost_session": total_cost,
+            "usage_month": monthly,
+            "limits": limits,
+            "uptime_seconds": uptime_secs,
+        }
+    }))
+}
+
+

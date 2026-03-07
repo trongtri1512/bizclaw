@@ -908,72 +908,281 @@ where
             &incoming.content[..incoming.content.len().min(100)]
         );
 
-        // Process through Agent Engine (tools + memory + providers)
-        match agent.process(&incoming.content).await {
-            Ok(response) => {
-                tracing::info!(
-                    "[{channel_name}] Response: {}...",
-                    &response[..response.len().min(80)]
-                );
+        let content = incoming.content.trim();
 
-                // Send response back through the same channel
-                match channel_name {
-                    "telegram" => {
-                        // Use Telegram sendMessage API
-                        if let Some(ref tg_cfg) = config.channel.telegram {
-                            let url = format!(
-                                "https://api.telegram.org/bot{}/sendMessage",
-                                tg_cfg.bot_token
-                            );
-                            let body = serde_json::json!({
-                                "chat_id": incoming.thread_id,
-                                "text": &response,
-                                "parse_mode": "Markdown",
-                            });
-                            if let Err(e) = send_client.post(&url).json(&body).send().await {
-                                tracing::error!("[telegram] Send failed: {e}");
-                            }
-                        }
-                    }
-                    "discord" => {
-                        // Use Discord REST API to send message
-                        if let Some(ref dc_cfg) = config.channel.discord {
-                            let url = format!(
-                                "https://discord.com/api/v10/channels/{}/messages",
-                                incoming.thread_id
-                            );
-                            let body = serde_json::json!({ "content": &response });
-                            if let Err(e) = send_client
-                                .post(&url)
-                                .header("Authorization", format!("Bot {}", dc_cfg.bot_token))
-                                .json(&body)
+        // ═══ Slash Command Handling ═══
+        // Intercept /hand, /run, /help, /status commands before forwarding to Agent
+        let response = if content.starts_with('/') {
+            let parts: Vec<&str> = content.splitn(3, ' ').collect();
+            let cmd = parts[0].to_lowercase();
+            let sub = parts.get(1).map(|s| s.to_lowercase()).unwrap_or_default();
+            let arg = parts.get(2).copied().unwrap_or("");
+
+            match cmd.as_str() {
+                "/help" => {
+                    Some("🦀 *BizClaw Commands*\n\n\
+                        📋 `/hand list` — Xem danh sách Hands\n\
+                        ▶️ `/hand run <name>` — Chạy Hand ngay\n\
+                        🔄 `/run <workflow>` — Chạy Workflow\n\
+                        📊 `/status` — Trạng thái hệ thống\n\
+                        ℹ️ `/help` — Hiện menu này\n\n\
+                        _Gửi tin nhắn bình thường để chat với AI agent._".to_string())
+                }
+                "/status" => {
+                    let provider = agent.provider_name().to_string();
+                    let conv_len = agent.conversation().len();
+                    Some(format!(
+                        "📊 *BizClaw Status*\n\n\
+                        🤖 Provider: {}\n\
+                        💬 Conversation: {} messages\n\
+                        📡 Channel: {}\n\
+                        ⏰ Time: {}",
+                        provider,
+                        conv_len,
+                        channel_name,
+                        chrono::Utc::now().format("%H:%M:%S UTC")
+                    ))
+                }
+                "/hand" => {
+                    match sub.as_str() {
+                        "list" | "ls" | "" => {
+                            // List hands — read from scheduler via API
+                            let client = reqwest::Client::new();
+                            match client
+                                .get("http://127.0.0.1:3000/api/v1/scheduler/tasks")
                                 .send()
                                 .await
                             {
-                                tracing::error!("[discord] Send failed: {e}");
+                                Ok(resp) => {
+                                    if let Ok(data) = resp.json::<serde_json::Value>().await {
+                                        let tasks = data["tasks"].as_array();
+                                        if let Some(tasks) = tasks {
+                                            let mut msg = "🤚 *Autonomous Hands*\n\n".to_string();
+                                            if tasks.is_empty() {
+                                                msg.push_str("_Chưa có Hand nào._");
+                                            }
+                                            for t in tasks {
+                                                let name = t["name"].as_str().unwrap_or("?");
+                                                let enabled = t["enabled"].as_bool().unwrap_or(false);
+                                                let runs = t["run_count"].as_u64().unwrap_or(0);
+                                                let status_icon = if enabled { "🟢" } else { "🔴" };
+                                                msg.push_str(&format!(
+                                                    "{} *{}* — {} runs\n",
+                                                    status_icon, name, runs
+                                                ));
+                                            }
+                                            msg.push_str("\n_Chạy: `/hand run <tên>`_");
+                                            Some(msg)
+                                        } else {
+                                            Some("⚠️ Không lấy được danh sách Hands.".to_string())
+                                        }
+                                    } else {
+                                        Some("⚠️ Lỗi đọc dữ liệu Hands.".to_string())
+                                    }
+                                }
+                                Err(e) => Some(format!("❌ Lỗi kết nối API: {}", e)),
                             }
                         }
+                        "run" | "trigger" => {
+                            if arg.is_empty() {
+                                Some("⚠️ Cần tên Hand. Ví dụ: `/hand run Research Hand`".to_string())
+                            } else {
+                                // Find and execute Hand by name
+                                let search_name = arg.to_lowercase();
+                                let client = reqwest::Client::new();
+                                match client
+                                    .get("http://127.0.0.1:3000/api/v1/scheduler/tasks")
+                                    .send()
+                                    .await
+                                {
+                                    Ok(resp) => {
+                                        if let Ok(data) = resp.json::<serde_json::Value>().await {
+                                            let tasks = data["tasks"].as_array().cloned().unwrap_or_default();
+                                            let found = tasks.iter().find(|t| {
+                                                t["name"].as_str().unwrap_or("").to_lowercase().contains(&search_name)
+                                            });
+                                            if let Some(task) = found {
+                                                let task_name = task["name"].as_str().unwrap_or("Hand");
+                                                let prompt = task["action"]["AgentPrompt"]
+                                                    .as_str()
+                                                    .or_else(|| task["action"]["AgentPrompt"]["prompt"].as_str())
+                                                    .unwrap_or("Execute this task")
+                                                    .to_string();
+
+                                                // Execute the prompt through the Agent
+                                                let indicator = format!("⏳ Đang chạy *{}*...", task_name);
+                                                // Send typing indicator
+                                                match channel_name {
+                                                    "telegram" => {
+                                                        if let Some(ref tg_cfg) = config.channel.telegram {
+                                                            let url = format!(
+                                                                "https://api.telegram.org/bot{}/sendMessage",
+                                                                tg_cfg.bot_token
+                                                            );
+                                                            let _ = send_client
+                                                                .post(&url)
+                                                                .json(&serde_json::json!({
+                                                                    "chat_id": incoming.thread_id,
+                                                                    "text": indicator,
+                                                                    "parse_mode": "Markdown"
+                                                                }))
+                                                                .send()
+                                                                .await;
+                                                        }
+                                                    }
+                                                    _ => {}
+                                                }
+
+                                                match agent.process(&prompt).await {
+                                                    Ok(result) => {
+                                                        Some(format!(
+                                                            "🤚 *{}* — Hoàn thành!\n\n{}\n\n_⏱ Executed at {}_",
+                                                            task_name,
+                                                            if result.len() > 3500 {
+                                                                format!("{}...", &result[..3500])
+                                                            } else {
+                                                                result
+                                                            },
+                                                            chrono::Utc::now().format("%H:%M:%S UTC")
+                                                        ))
+                                                    }
+                                                    Err(e) => Some(format!("❌ Lỗi chạy {}: {}", task_name, e)),
+                                                }
+                                            } else {
+                                                Some(format!(
+                                                    "❌ Không tìm thấy Hand: '{}'\n_Dùng `/hand list` để xem danh sách._",
+                                                    arg
+                                                ))
+                                            }
+                                        } else {
+                                            Some("⚠️ Lỗi đọc dữ liệu.".to_string())
+                                        }
+                                    }
+                                    Err(e) => Some(format!("❌ Lỗi API: {}", e)),
+                                }
+                            }
+                        }
+                        _ => Some(format!(
+                            "⚠️ Lệnh không hợp lệ: `/hand {}`\n_Dùng `/hand list` hoặc `/hand run <tên>`_",
+                            sub
+                        )),
                     }
-                    "email" => {
-                        // Reply via SMTP (if email channel has send capability)
-                        if let Some(ref _email_cfg) = config.channel.email {
-                            tracing::info!(
-                                "[email] Reply to {}: {}...",
-                                incoming.sender_id,
-                                &response[..response.len().min(60)]
-                            );
-                            // Email replies are handled by the EmailChannel's send() method
-                            // The incoming.sender_id contains the From address
-                            // For now, log the reply — full SMTP send is in EmailChannel
+                }
+                "/run" => {
+                    if sub.is_empty() {
+                        Some("⚠️ Cần tên workflow. Ví dụ: `/run content-creation`\n_Dùng `/hand list` để xem danh sách._".to_string())
+                    } else {
+                        // Try to run as workflow via API
+                        let client = reqwest::Client::new();
+                        match client
+                            .post("http://127.0.0.1:3000/api/v1/workflows/run")
+                            .json(&serde_json::json!({
+                                "workflow_id": sub,
+                                "input": arg
+                            }))
+                            .send()
+                            .await
+                        {
+                            Ok(resp) => {
+                                if let Ok(data) = resp.json::<serde_json::Value>().await {
+                                    if data["ok"].as_bool().unwrap_or(false) {
+                                        let result = data["final_output"]
+                                            .as_str()
+                                            .unwrap_or("Workflow completed");
+                                        Some(format!(
+                                            "🔄 *Workflow '{}' — Done!*\n\n{}",
+                                            sub,
+                                            if result.len() > 3500 {
+                                                format!("{}...", &result[..3500])
+                                            } else {
+                                                result.to_string()
+                                            }
+                                        ))
+                                    } else {
+                                        let err = data["error"].as_str().unwrap_or("Unknown error");
+                                        Some(format!("❌ Workflow error: {}", err))
+                                    }
+                                } else {
+                                    Some("⚠️ Lỗi đọc kết quả.".to_string())
+                                }
+                            }
+                            Err(e) => Some(format!("❌ Lỗi API: {}", e)),
                         }
                     }
-                    _ => {
-                        tracing::warn!("[{channel_name}] No send handler implemented");
+                }
+                // Unknown slash command — let it pass to agent
+                _ => None,
+            }
+        } else {
+            None
+        };
+
+        // Use command response or process through Agent
+        let final_response = if let Some(cmd_resp) = response {
+            cmd_resp
+        } else {
+            // Process through Agent Engine (tools + memory + providers)
+            match agent.process(&incoming.content).await {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::error!("[{channel_name}] Agent error: {e}");
+                    format!("❌ Error: {e}")
+                }
+            }
+        };
+
+        tracing::info!(
+            "[{channel_name}] Response: {}...",
+            &final_response[..final_response.len().min(80)]
+        );
+
+        // Send response back through the same channel
+        match channel_name {
+            "telegram" => {
+                if let Some(ref tg_cfg) = config.channel.telegram {
+                    let url = format!(
+                        "https://api.telegram.org/bot{}/sendMessage",
+                        tg_cfg.bot_token
+                    );
+                    let body = serde_json::json!({
+                        "chat_id": incoming.thread_id,
+                        "text": &final_response,
+                        "parse_mode": "Markdown",
+                    });
+                    if let Err(e) = send_client.post(&url).json(&body).send().await {
+                        tracing::error!("[telegram] Send failed: {e}");
                     }
                 }
             }
-            Err(e) => {
-                tracing::error!("[{channel_name}] Agent error: {e}");
+            "discord" => {
+                if let Some(ref dc_cfg) = config.channel.discord {
+                    let url = format!(
+                        "https://discord.com/api/v10/channels/{}/messages",
+                        incoming.thread_id
+                    );
+                    let body = serde_json::json!({ "content": &final_response });
+                    if let Err(e) = send_client
+                        .post(&url)
+                        .header("Authorization", format!("Bot {}", dc_cfg.bot_token))
+                        .json(&body)
+                        .send()
+                        .await
+                    {
+                        tracing::error!("[discord] Send failed: {e}");
+                    }
+                }
+            }
+            "email" => {
+                if let Some(ref _email_cfg) = config.channel.email {
+                    tracing::info!(
+                        "[email] Reply to {}: {}...",
+                        incoming.sender_id,
+                        &final_response[..final_response.len().min(60)]
+                    );
+                }
+            }
+            _ => {
+                tracing::warn!("[{channel_name}] No send handler implemented");
             }
         }
     }

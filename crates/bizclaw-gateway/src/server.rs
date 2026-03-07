@@ -453,6 +453,17 @@ pub fn build_router_from_arc(shared: Arc<AppState>) -> Router {
         .route("/api/v1/skills/{id}", axum::routing::put(super::routes::skills_update))
         .route("/api/v1/skills/{id}", axum::routing::delete(super::routes::skills_delete))
         .route("/api/v1/tts/voices", get(super::routes::tts_voices))
+        // PaaS: API Key Management
+        .route("/api/v1/api-keys", get(super::routes::list_api_keys))
+        .route("/api/v1/api-keys", post(super::routes::create_api_key))
+        .route("/api/v1/api-keys/{id}", axum::routing::delete(super::routes::revoke_api_key))
+        // PaaS: Usage & Quotas
+        .route("/api/v1/usage", get(super::routes::get_usage))
+        .route("/api/v1/usage/daily", get(super::routes::get_usage_daily))
+        .route("/api/v1/usage/limits", get(super::routes::get_plan_limits))
+        .route("/api/v1/usage/limits", axum::routing::put(super::routes::update_plan_limits))
+        // PaaS: System Metrics
+        .route("/api/v1/metrics", get(super::routes::get_system_metrics))
         .route("/ws", get(super::ws::ws_handler))
         .route_layer(axum::middleware::from_fn_with_state(
             shared.clone(),
@@ -744,12 +755,18 @@ pub async fn start(config: &GatewayConfig) -> anyhow::Result<()> {
     // Wrap orchestrator in Arc for shared access
     let orchestrator_arc = Arc::new(tokio::sync::Mutex::new(orchestrator));
 
+    let (activity_tx, _rx) = tokio::sync::broadcast::channel::<super::openai_compat::ActivityEvent>(256);
+
     // Spawn scheduler background loop with Agent integration (check every 30 seconds)
     let sched_clone = scheduler.clone();
     let orch_for_sched = orchestrator_arc.clone();
+    let config_for_sched = full_config.clone();
+    let activity_tx_for_sched = activity_tx.clone();
+    let db_for_sched = gateway_db.clone();
     tokio::spawn(async move {
         bizclaw_scheduler::engine::spawn_scheduler_with_agent(
             sched_clone,
+            // Agent callback: execute prompt through orchestrator
             move |prompt: String| {
                 let orch = orch_for_sched.clone();
                 async move {
@@ -757,12 +774,95 @@ pub async fn start(config: &GatewayConfig) -> anyhow::Result<()> {
                     o.send(&prompt).await.map_err(|e| e.to_string())
                 }
             },
+            // Result callback: dispatch results to channels + activity feed
+            move |task_name: String, response: String| {
+                let cfg = config_for_sched.clone();
+                let tx = activity_tx_for_sched.clone();
+                let db = db_for_sched.clone();
+                async move {
+                    // 1. Broadcast to Dashboard Activity Feed
+                    let _ = tx.send(super::openai_compat::ActivityEvent {
+                        event_type: "hand.completed".into(),
+                        agent: task_name.clone(),
+                        detail: format!(
+                            "{}",
+                            if response.len() > 150 {
+                                format!("{}...", &response[..150])
+                            } else {
+                                response.clone()
+                            }
+                        ),
+                        timestamp: chrono::Utc::now(),
+                    });
+
+                    // 2. Track usage
+                    let _ = db.track_usage("hand_executions", 1.0);
+
+                    // 3. Send to Telegram (all configured bots)
+                    if let Some(ref tg_cfg) = cfg.channel.telegram {
+                        if tg_cfg.enabled && !tg_cfg.bot_token.is_empty() {
+                            // Get notify chat_id from env or config
+                            let chat_id = std::env::var("BIZCLAW_NOTIFY_TELEGRAM_CHAT_ID")
+                                .unwrap_or_default();
+                            if !chat_id.is_empty() {
+                                let msg = format!(
+                                    "🤚 *Hand Report: {}*\n\n{}\n\n_— BizClaw Autonomous Hands_",
+                                    task_name,
+                                    if response.len() > 3500 {
+                                        format!("{}...", &response[..3500])
+                                    } else {
+                                        response.clone()
+                                    }
+                                );
+                                let url = format!(
+                                    "https://api.telegram.org/bot{}/sendMessage",
+                                    tg_cfg.bot_token
+                                );
+                                let client = reqwest::Client::new();
+                                let _ = client
+                                    .post(&url)
+                                    .json(&serde_json::json!({
+                                        "chat_id": chat_id,
+                                        "text": msg,
+                                        "parse_mode": "Markdown"
+                                    }))
+                                    .send()
+                                    .await;
+                                tracing::info!(
+                                    "📨 Hand result sent to Telegram: {} → chat {}",
+                                    task_name,
+                                    chat_id
+                                );
+                            }
+                        }
+                    }
+
+                    // 4. Send to Webhook (if configured)
+                    if let Some(ref wh_cfg) = cfg.channel.webhook {
+                        if wh_cfg.enabled && !wh_cfg.outbound_url.is_empty() {
+                            let client = reqwest::Client::new();
+                            let _ = client
+                                .post(&wh_cfg.outbound_url)
+                                .json(&serde_json::json!({
+                                    "event": "hand.completed",
+                                    "task_name": task_name,
+                                    "result": response,
+                                    "timestamp": chrono::Utc::now().to_rfc3339(),
+                                }))
+                                .send()
+                                .await;
+                        }
+                    }
+
+                    tracing::info!("📢 Hand result dispatched: {}", task_name);
+                }
+            },
             30,
         )
         .await;
     });
 
-    let (activity_tx, _rx) = tokio::sync::broadcast::channel::<super::openai_compat::ActivityEvent>(256);
+
 
     let state = AppState {
         gateway_config: config.clone(),

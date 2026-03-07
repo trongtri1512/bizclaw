@@ -186,6 +186,15 @@ pub async fn chat_completions(
         traces.push(trace);
     }
 
+    // Track usage in PaaS DB (daily aggregation)
+    {
+        let _ = state.db.track_usage("requests", 1.0);
+        let _ = state.db.track_usage("tokens_in", est_prompt_tokens as f64);
+        let _ = state.db.track_usage("tokens_out", est_completion_tokens as f64);
+        let cost = estimate_cost(&req.model, est_prompt_tokens, est_completion_tokens);
+        let _ = state.db.track_usage("cost_usd", cost);
+    }
+
     // Broadcast activity event via WebSocket
     let _ = state.activity_tx.send(ActivityEvent {
         event_type: "llm.completed".into(),

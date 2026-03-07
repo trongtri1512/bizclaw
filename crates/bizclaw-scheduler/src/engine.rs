@@ -262,21 +262,24 @@ pub async fn spawn_scheduler(engine: Arc<Mutex<SchedulerEngine>>, check_interval
     }
 }
 
-/// Enhanced scheduler loop with Agent integration and retry support.
-/// When an AgentPrompt task fires, it sends the prompt to the callback.
-/// Webhook tasks are actually fired via HTTP.
+/// Enhanced scheduler loop with Agent integration, retry support, and result dispatch.
+/// When an AgentPrompt task fires, it sends the prompt to `agent_callback`.
+/// After successful execution, `result_callback` is called with (task_name, response)
+/// so the gateway can dispatch results to channels (Telegram, Zalo, Discord, etc.).
 /// On failure, tasks are retried with exponential backoff.
-/// Permanently failed tasks generate urgent admin notifications.
 ///
-/// The `agent_callback` is a function that takes a prompt string and returns
-/// a Result<String>. This avoids circular dependency with bizclaw-agent.
-pub async fn spawn_scheduler_with_agent<F, Fut>(
+/// The `agent_callback` takes a prompt string and returns a Result<String>.
+/// The `result_callback` takes (task_name, result) and dispatches it to channels.
+pub async fn spawn_scheduler_with_agent<F, Fut, R, RFut>(
     engine: Arc<Mutex<SchedulerEngine>>,
     agent_callback: F,
+    result_callback: R,
     check_interval_secs: u64,
 ) where
     F: Fn(String) -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = Result<String, String>> + Send,
+    R: Fn(String, String) -> RFut + Send + Sync + 'static,
+    RFut: std::future::Future<Output = ()> + Send,
 {
     tracing::info!(
         "⏰ Scheduler started with Agent integration + retry support (check every {}s)",
@@ -344,17 +347,17 @@ pub async fn spawn_scheduler_with_agent<F, Fut>(
             let mut eng = engine.lock().await;
             if let Some(task) = eng.tasks_mut().iter_mut().find(|t| t.id == *task_id) {
                 match execution_result {
-                    Ok(response) => {
+                    Ok(ref response) => {
                         task.mark_success();
                         let truncated = if response.len() > 200 {
                             format!("{}...", &response[..200])
                         } else {
-                            response
+                            response.clone()
                         };
                         tracing::info!("✅ Task '{}' succeeded: {}", task_name, truncated);
                     }
-                    Err(e) => {
-                        let will_retry = task.schedule_retry(&e);
+                    Err(ref e) => {
+                        let will_retry = task.schedule_retry(e);
                         if !will_retry {
                             // Permanently failed → urgent notification
                             let notification = NotifyRouter::create(
@@ -365,7 +368,7 @@ pub async fn spawn_scheduler_with_agent<F, Fut>(
                                      Action: {}",
                                     task_name,
                                     task.fail_count,
-                                    if e.len() > 200 { &e[..200] } else { &e },
+                                    if e.len() > 200 { &e[..200] } else { e },
                                     action_summary(action),
                                 ),
                                 "scheduler",
@@ -377,6 +380,11 @@ pub async fn spawn_scheduler_with_agent<F, Fut>(
                 }
             }
             eng.save();
+
+            // ═══ Dispatch result to channels via callback ═══
+            if let Ok(response) = execution_result {
+                result_callback(task_name.clone(), response).await;
+            }
         }
     }
 }

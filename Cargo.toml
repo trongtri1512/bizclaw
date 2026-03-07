@@ -145,6 +145,7 @@ futures.workspace = true
 reqwest.workspace = true
 shellexpand.workspace = true
 rand.workspace = true
+chrono.workspace = true
 
 [[bin]]
 name = "bizclaw"

@@ -122,6 +122,34 @@ impl GatewayDb {
                 value TEXT DEFAULT '',
                 updated_at TEXT DEFAULT (datetime('now'))
             );
+
+            -- PaaS: API Key Management
+            CREATE TABLE IF NOT EXISTS api_keys (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                key_hash TEXT NOT NULL,
+                key_prefix TEXT NOT NULL DEFAULT '',
+                scopes TEXT DEFAULT 'read,write',
+                active INTEGER DEFAULT 1,
+                last_used_at TEXT,
+                expires_at TEXT,
+                created_at TEXT DEFAULT (datetime('now'))
+            );
+
+            -- PaaS: Daily Usage Tracking
+            CREATE TABLE IF NOT EXISTS usage_daily (
+                date TEXT NOT NULL,
+                metric TEXT NOT NULL,
+                value REAL DEFAULT 0,
+                PRIMARY KEY (date, metric)
+            );
+
+            -- PaaS: Plan Limits
+            CREATE TABLE IF NOT EXISTS plan_limits (
+                key TEXT PRIMARY KEY,
+                value INTEGER DEFAULT 0,
+                updated_at TEXT DEFAULT (datetime('now'))
+            );
         ").map_err(|e| format!("Migration error: {e}"))?;
         
         // Migration: add new columns to existing providers table
@@ -893,5 +921,203 @@ mod tests {
         assert_eq!(all.len(), 2);
         assert_eq!(all["a1"].len(), 2);
         assert_eq!(all["a2"].len(), 1);
+    }
+}
+
+// ═══ PaaS: API Key Management ═══
+impl GatewayDb {
+    /// Create a new API key. Returns the raw key (only shown once).
+    pub fn create_api_key(&self, name: &str, scopes: &str, expires_days: Option<i64>) -> Result<(String, String), String> {
+        let conn = self.conn.lock().map_err(|e| format!("Lock: {e}"))?;
+        let id = uuid::Uuid::new_v4().to_string();
+        // Generate a secure random key with bz_ prefix
+        let raw_key = format!("bz_{}", uuid::Uuid::new_v4().to_string().replace("-", ""));
+        let key_prefix = &raw_key[..10];
+        // Hash the key for storage
+        let key_hash = {
+            use sha2::Digest;
+            let mut hasher = sha2::Sha256::new();
+            hasher.update(raw_key.as_bytes());
+            format!("{:x}", hasher.finalize())
+        };
+        let expires_at = expires_days.map(|d| {
+            let now = chrono::Utc::now();
+            (now + chrono::Duration::days(d)).format("%Y-%m-%dT%H:%M:%SZ").to_string()
+        });
+        conn.execute(
+            "INSERT INTO api_keys (id, name, key_hash, key_prefix, scopes, expires_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![id, name, key_hash, key_prefix, scopes, expires_at],
+        ).map_err(|e| format!("Create API key: {e}"))?;
+        Ok((id, raw_key))
+    }
+
+    /// List all API keys (without hashes, only prefixes).
+    pub fn list_api_keys(&self) -> Result<Vec<serde_json::Value>, String> {
+        let conn = self.conn.lock().map_err(|e| format!("Lock: {e}"))?;
+        let mut stmt = conn.prepare(
+            "SELECT id, name, key_prefix, scopes, active, last_used_at, expires_at, created_at FROM api_keys ORDER BY created_at DESC"
+        ).map_err(|e| format!("Prepare: {e}"))?;
+        let rows = stmt.query_map([], |row| {
+            Ok(serde_json::json!({
+                "id": row.get::<_, String>(0)?,
+                "name": row.get::<_, String>(1)?,
+                "key_prefix": row.get::<_, String>(2)?,
+                "scopes": row.get::<_, String>(3)?,
+                "active": row.get::<_, bool>(4)?,
+                "last_used_at": row.get::<_, Option<String>>(5)?.unwrap_or_default(),
+                "expires_at": row.get::<_, Option<String>>(6)?.unwrap_or_default(),
+                "created_at": row.get::<_, String>(7)?,
+            }))
+        }).map_err(|e| format!("Query: {e}"))?;
+        let mut keys = Vec::new();
+        for row in rows { keys.push(row.map_err(|e| format!("Row: {e}"))?); }
+        Ok(keys)
+    }
+
+    /// Revoke (delete) an API key.
+    pub fn revoke_api_key(&self, id: &str) -> Result<bool, String> {
+        let conn = self.conn.lock().map_err(|e| format!("Lock: {e}"))?;
+        let count = conn.execute("DELETE FROM api_keys WHERE id = ?1", params![id])
+            .map_err(|e| format!("Delete: {e}"))?;
+        Ok(count > 0)
+    }
+
+    /// Validate an API key. Returns the key record if valid.
+    pub fn validate_api_key(&self, raw_key: &str) -> Result<Option<serde_json::Value>, String> {
+        let key_hash = {
+            use sha2::Digest;
+            let mut hasher = sha2::Sha256::new();
+            hasher.update(raw_key.as_bytes());
+            format!("{:x}", hasher.finalize())
+        };
+        let conn = self.conn.lock().map_err(|e| format!("Lock: {e}"))?;
+        let result = conn.query_row(
+            "SELECT id, name, scopes, active, expires_at FROM api_keys WHERE key_hash = ?1",
+            params![key_hash],
+            |row| {
+                Ok(serde_json::json!({
+                    "id": row.get::<_, String>(0)?,
+                    "name": row.get::<_, String>(1)?,
+                    "scopes": row.get::<_, String>(2)?,
+                    "active": row.get::<_, bool>(3)?,
+                    "expires_at": row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                }))
+            },
+        );
+        match result {
+            Ok(val) => {
+                // Check if active and not expired
+                if !val["active"].as_bool().unwrap_or(false) {
+                    return Ok(None);
+                }
+                if let Some(exp) = val["expires_at"].as_str() {
+                    if !exp.is_empty() {
+                        if let Ok(exp_time) = chrono::DateTime::parse_from_rfc3339(exp) {
+                            if exp_time < chrono::Utc::now() {
+                                return Ok(None); // expired
+                            }
+                        }
+                    }
+                }
+                // Update last_used_at
+                let _ = conn.execute(
+                    "UPDATE api_keys SET last_used_at = datetime('now') WHERE key_hash = ?1",
+                    params![key_hash],
+                );
+                Ok(Some(val))
+            }
+            Err(_) => Ok(None),
+        }
+    }
+}
+
+// ═══ PaaS: Usage Tracking ═══
+impl GatewayDb {
+    /// Increment a daily usage metric.
+    pub fn track_usage(&self, metric: &str, value: f64) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| format!("Lock: {e}"))?;
+        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        conn.execute(
+            "INSERT INTO usage_daily (date, metric, value) VALUES (?1, ?2, ?3) \
+             ON CONFLICT(date, metric) DO UPDATE SET value = value + ?3",
+            params![today, metric, value],
+        ).map_err(|e| format!("Track usage: {e}"))?;
+        Ok(())
+    }
+
+    /// Get usage for current month.
+    pub fn get_monthly_usage(&self) -> Result<serde_json::Value, String> {
+        let conn = self.conn.lock().map_err(|e| format!("Lock: {e}"))?;
+        let month_start = chrono::Utc::now().format("%Y-%m-01").to_string();
+        let mut stmt = conn.prepare(
+            "SELECT metric, SUM(value) FROM usage_daily WHERE date >= ?1 GROUP BY metric"
+        ).map_err(|e| format!("Prepare: {e}"))?;
+        let rows = stmt.query_map(params![month_start], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
+        }).map_err(|e| format!("Query: {e}"))?;
+        let mut usage = serde_json::Map::new();
+        for row in rows {
+            if let Ok((metric, value)) = row {
+                usage.insert(metric, serde_json::json!(value));
+            }
+        }
+        Ok(serde_json::Value::Object(usage))
+    }
+
+    /// Get daily usage for the last N days.
+    pub fn get_daily_usage(&self, days: i64) -> Result<Vec<serde_json::Value>, String> {
+        let conn = self.conn.lock().map_err(|e| format!("Lock: {e}"))?;
+        let since = (chrono::Utc::now() - chrono::Duration::days(days))
+            .format("%Y-%m-%d").to_string();
+        let mut stmt = conn.prepare(
+            "SELECT date, metric, value FROM usage_daily WHERE date >= ?1 ORDER BY date ASC"
+        ).map_err(|e| format!("Prepare: {e}"))?;
+        let rows = stmt.query_map(params![since], |row| {
+            Ok(serde_json::json!({
+                "date": row.get::<_, String>(0)?,
+                "metric": row.get::<_, String>(1)?,
+                "value": row.get::<_, f64>(2)?,
+            }))
+        }).map_err(|e| format!("Query: {e}"))?;
+        let mut items = Vec::new();
+        for row in rows { if let Ok(v) = row { items.push(v); } }
+        Ok(items)
+    }
+
+    /// Get/set plan limits.
+    pub fn get_plan_limits(&self) -> Result<serde_json::Value, String> {
+        let conn = self.conn.lock().map_err(|e| format!("Lock: {e}"))?;
+        // Seed defaults if empty
+        conn.execute_batch("
+            INSERT OR IGNORE INTO plan_limits (key, value) VALUES ('max_agents', 10);
+            INSERT OR IGNORE INTO plan_limits (key, value) VALUES ('max_channels', 5);
+            INSERT OR IGNORE INTO plan_limits (key, value) VALUES ('max_tokens_month', 1000000);
+            INSERT OR IGNORE INTO plan_limits (key, value) VALUES ('max_storage_mb', 1024);
+            INSERT OR IGNORE INTO plan_limits (key, value) VALUES ('max_api_keys', 10);
+            INSERT OR IGNORE INTO plan_limits (key, value) VALUES ('max_mcp_servers', 5);
+        ").ok();
+        let mut stmt = conn.prepare("SELECT key, value FROM plan_limits")
+            .map_err(|e| format!("Prepare: {e}"))?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        }).map_err(|e| format!("Query: {e}"))?;
+        let mut limits = serde_json::Map::new();
+        for row in rows {
+            if let Ok((key, value)) = row {
+                limits.insert(key, serde_json::json!(value));
+            }
+        }
+        Ok(serde_json::Value::Object(limits))
+    }
+
+    /// Update a plan limit.
+    pub fn set_plan_limit(&self, key: &str, value: i64) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| format!("Lock: {e}"))?;
+        conn.execute(
+            "INSERT INTO plan_limits (key, value, updated_at) VALUES (?1, ?2, datetime('now')) \
+             ON CONFLICT(key) DO UPDATE SET value = ?2, updated_at = datetime('now')",
+            params![key, value],
+        ).map_err(|e| format!("Set limit: {e}"))?;
+        Ok(())
     }
 }
