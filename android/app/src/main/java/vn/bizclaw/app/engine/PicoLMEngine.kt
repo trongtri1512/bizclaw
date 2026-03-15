@@ -1,0 +1,365 @@
+package vn.bizclaw.app.engine
+
+import android.os.Build
+import android.util.Log
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.withContext
+import kotlinx.serialization.Serializable
+import java.io.File
+import java.io.FileNotFoundException
+
+/**
+ * BizClaw LLM Engine — On-device LLM inference powered by llama.cpp
+ *
+ * Architecture (same as SmolChat-Android):
+ *   Kotlin BizClawLLM → JNI → llm_inference.cpp → llama.cpp C/C++
+ *
+ * Key features:
+ * - Load any GGUF model (Qwen3, DeepSeek, Llama, Phi, TinyLlama, etc.)
+ * - Streaming token generation via Kotlin Flow
+ * - Chat template auto-detection from GGUF metadata
+ * - CPU feature detection (fp16, dotprod, SVE, i8mm) for optimal SIMD
+ * - Context window management with chat history
+ * - Benchmarking (tokens/sec)
+ * - mmap + mlock support
+ *
+ * Reference: github.com/shubham0204/SmolChat-Android
+ * Quantization support: Q2_K → Q8_0, F16, F32
+ */
+class BizClawLLM {
+    companion object {
+        private const val TAG = "BizClawLLM"
+
+        init {
+            val cpuFeatures = getCPUFeatures()
+            val hasFp16 = cpuFeatures.contains("fp16") || cpuFeatures.contains("fphp")
+            val hasDotProd = cpuFeatures.contains("dotprod") || cpuFeatures.contains("asimddp")
+            val hasSve = cpuFeatures.contains("sve")
+            val hasI8mm = cpuFeatures.contains("i8mm")
+            val isAtLeastArmV82 = cpuFeatures.contains("asimd") &&
+                cpuFeatures.contains("crc32") && cpuFeatures.contains("aes")
+            val isAtLeastArmV84 = cpuFeatures.contains("dcpop") && cpuFeatures.contains("uscat")
+
+            Log.i(TAG, "CPU features: fp16=$hasFp16, dotprod=$hasDotProd, sve=$hasSve, i8mm=$hasI8mm")
+
+            val isEmulated = Build.HARDWARE.contains("goldfish") || Build.HARDWARE.contains("ranchu")
+
+            if (!isEmulated && supportsArm64V8a()) {
+                val libName = when {
+                    isAtLeastArmV84 && hasSve && hasI8mm && hasFp16 && hasDotProd ->
+                        "bizclaw_llm_v8_4_fp16_dotprod_i8mm_sve"
+                    isAtLeastArmV84 && hasSve && hasFp16 && hasDotProd ->
+                        "bizclaw_llm_v8_4_fp16_dotprod_sve"
+                    isAtLeastArmV84 && hasI8mm && hasFp16 && hasDotProd ->
+                        "bizclaw_llm_v8_4_fp16_dotprod_i8mm"
+                    isAtLeastArmV84 && hasFp16 && hasDotProd ->
+                        "bizclaw_llm_v8_4_fp16_dotprod"
+                    isAtLeastArmV82 && hasFp16 && hasDotProd ->
+                        "bizclaw_llm_v8_2_fp16_dotprod"
+                    isAtLeastArmV82 && hasFp16 ->
+                        "bizclaw_llm_v8_2_fp16"
+                    else -> "bizclaw_llm_v8"
+                }
+                Log.i(TAG, "⚡ Loading lib$libName.so")
+                System.loadLibrary(libName)
+            } else {
+                Log.i(TAG, "Loading default libbizclaw_llm.so")
+                System.loadLibrary("bizclaw_llm")
+            }
+        }
+
+        private fun getCPUFeatures(): String {
+            return try {
+                File("/proc/cpuinfo").readText()
+                    .substringAfter("Features").substringAfter(":")
+                    .substringBefore("\n").trim()
+            } catch (_: FileNotFoundException) { "" }
+        }
+
+        private fun supportsArm64V8a(): Boolean = Build.SUPPORTED_ABIS[0] == "arm64-v8a"
+    }
+
+    // Pointer to native LLMInference object
+    private var nativePtr = 0L
+
+    /**
+     * Inference parameters for the model.
+     */
+    data class InferenceParams(
+        val minP: Float = 0.1f,
+        val temperature: Float = 0.7f,
+        val storeChats: Boolean = true,
+        val contextSize: Long? = null,
+        val chatTemplate: String? = null,
+        val numThreads: Int = 4,
+        val useMmap: Boolean = true,
+        val useMlock: Boolean = false,
+    )
+
+    object DefaultParams {
+        val contextSize: Long = 2048L
+        val chatTemplate: String =
+            "{% for message in messages %}{% if loop.first and messages[0]['role'] != 'system' %}" +
+            "{{ '<|im_start|>system\nYou are BizClaw, a helpful AI assistant.<|im_end|>\n' }}" +
+            "{% endif %}{{ '<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>\n' }}" +
+            "{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}"
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // State
+    // ═══════════════════════════════════════════════════════════
+
+    val isLoaded: Boolean get() = nativePtr != 0L
+
+    // ═══════════════════════════════════════════════════════════
+    // Core API
+    // ═══════════════════════════════════════════════════════════
+
+    /**
+     * Load a GGUF model from device storage.
+     * Reads chat template and context size from GGUF metadata if not provided.
+     */
+    suspend fun load(modelPath: String, params: InferenceParams = InferenceParams()) =
+        withContext(Dispatchers.IO) {
+            Log.i(TAG, "Loading model: $modelPath")
+
+            // Read GGUF metadata for context size and chat template
+            val ggufReader = GGUFReader()
+            ggufReader.load(modelPath)
+            val modelContextSize = ggufReader.getContextSize() ?: DefaultParams.contextSize
+            val modelChatTemplate = ggufReader.getChatTemplate() ?: DefaultParams.chatTemplate
+
+            nativePtr = loadModel(
+                modelPath,
+                params.minP,
+                params.temperature,
+                params.storeChats,
+                params.contextSize ?: modelContextSize,
+                params.chatTemplate ?: modelChatTemplate,
+                params.numThreads,
+                params.useMmap,
+                params.useMlock,
+            )
+            Log.i(TAG, "✅ Model loaded (ptr=$nativePtr)")
+        }
+
+    /** Add a user message to chat history */
+    fun addUserMessage(message: String) {
+        verifyHandle()
+        addChatMessage(nativePtr, message, "user")
+    }
+
+    /** Add system prompt */
+    fun addSystemPrompt(prompt: String) {
+        verifyHandle()
+        addChatMessage(nativePtr, prompt, "system")
+    }
+
+    /** Add assistant message (for few-shot context) */
+    fun addAssistantMessage(message: String) {
+        verifyHandle()
+        addChatMessage(nativePtr, message, "assistant")
+    }
+
+    /**
+     * Get streaming response as Kotlin Flow.
+     * Each emission is a token piece. "[EOG]" signals end of generation.
+     */
+    fun getResponseAsFlow(query: String): Flow<String> = flow {
+        verifyHandle()
+        startCompletion(nativePtr, query)
+        var piece = completionLoop(nativePtr)
+        while (piece != "[EOG]") {
+            emit(piece)
+            piece = completionLoop(nativePtr)
+        }
+        stopCompletion(nativePtr)
+    }
+
+    /** Get complete response (blocking) */
+    fun getResponse(query: String): String {
+        verifyHandle()
+        startCompletion(nativePtr, query)
+        val sb = StringBuilder()
+        var piece = completionLoop(nativePtr)
+        while (piece != "[EOG]") {
+            sb.append(piece)
+            piece = completionLoop(nativePtr)
+        }
+        stopCompletion(nativePtr)
+        return sb.toString()
+    }
+
+    /** tokens/sec for last generation */
+    fun getGenerationSpeed(): Float {
+        verifyHandle()
+        return getResponseGenerationSpeed(nativePtr)
+    }
+
+    /** How much context window is consumed */
+    fun getContextUsed(): Int {
+        verifyHandle()
+        return getContextSizeUsed(nativePtr)
+    }
+
+    /** Benchmark model performance */
+    fun benchmark(pp: Int = 512, tg: Int = 128, pl: Int = 1, nr: Int = 3): String {
+        verifyHandle()
+        return benchModel(nativePtr, pp, tg, pl, nr)
+    }
+
+    /** Release model and free native resources */
+    fun close() {
+        if (nativePtr != 0L) {
+            close(nativePtr)
+            nativePtr = 0L
+            Log.i(TAG, "Model unloaded")
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // JNI native methods
+    // ═══════════════════════════════════════════════════════════
+
+    private fun verifyHandle() {
+        check(nativePtr != 0L) { "Model not loaded. Call load() first." }
+    }
+
+    private external fun loadModel(
+        modelPath: String, minP: Float, temperature: Float,
+        storeChats: Boolean, contextSize: Long, chatTemplate: String,
+        nThreads: Int, useMmap: Boolean, useMlock: Boolean,
+    ): Long
+
+    private external fun addChatMessage(modelPtr: Long, message: String, role: String)
+    private external fun getResponseGenerationSpeed(modelPtr: Long): Float
+    private external fun getContextSizeUsed(modelPtr: Long): Int
+    private external fun close(modelPtr: Long)
+    private external fun startCompletion(modelPtr: Long, prompt: String)
+    private external fun completionLoop(modelPtr: Long): String
+    private external fun stopCompletion(modelPtr: Long)
+    private external fun benchModel(modelPtr: Long, pp: Int, tg: Int, pl: Int, nr: Int): String
+}
+
+/**
+ * GGUF metadata reader — reads context size and chat template from GGUF file.
+ * Separate native library (ggufreader) so model metadata can be read without full load.
+ */
+class GGUFReader {
+    companion object {
+        init {
+            System.loadLibrary("bizclaw_ggufreader")
+        }
+    }
+
+    private var nativeHandle: Long = 0L
+
+    suspend fun load(modelPath: String) = withContext(Dispatchers.IO) {
+        nativeHandle = getGGUFContextNativeHandle(modelPath)
+    }
+
+    fun getContextSize(): Long? {
+        check(nativeHandle != 0L) { "Use GGUFReader.load() first" }
+        val size = getContextSize(nativeHandle)
+        return if (size == -1L) null else size
+    }
+
+    fun getChatTemplate(): String? {
+        check(nativeHandle != 0L) { "Use GGUFReader.load() first" }
+        val template = getChatTemplate(nativeHandle)
+        return template.ifEmpty { null }
+    }
+
+    private external fun getGGUFContextNativeHandle(modelPath: String): Long
+    private external fun getContextSize(nativeHandle: Long): Long
+    private external fun getChatTemplate(nativeHandle: Long): String
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Model catalog
+// ═══════════════════════════════════════════════════════════════
+
+data class DownloadableModel(
+    val name: String,
+    val description: String,
+    val url: String,
+    val sizeBytes: Long,
+    val paramCount: String,
+    val quantization: String,
+    val chatTemplate: String,
+) {
+    val sizeDisplay: String
+        get() {
+            val gb = sizeBytes / 1_000_000_000.0
+            return if (gb >= 1.0) "%.1f GB".format(gb) else "${sizeBytes / 1_000_000} MB"
+        }
+}
+
+/** Curated list of recommended GGUF models for on-device inference */
+val RECOMMENDED_MODELS = listOf(
+    DownloadableModel(
+        name = "⭐ Jan-nano 4B Q4_K_M",
+        description = "Best for tool-calling & agents (8GB+ RAM). DAPO-tuned, beats DeepSeek-671B on SimpleQA",
+        url = "https://huggingface.co/janhq/Jan-nano-GGUF/resolve/main/Jan-nano-Q4_K_M.gguf",
+        sizeBytes = 2_700_000_000L,
+        paramCount = "4B",
+        quantization = "Q4_K_M",
+        chatTemplate = "qwen2",
+    ),
+    DownloadableModel(
+        name = "Qwen3 0.6B Instruct Q4_K_M",
+        description = "Ultra-light (400MB), runs on ANY phone. Perfect for Pi/low-RAM",
+        url = "https://huggingface.co/Qwen/Qwen3-0.6B-GGUF/resolve/main/qwen3-0.6b-q4_k_m.gguf",
+        sizeBytes = 400_000_000L,
+        paramCount = "0.6B",
+        quantization = "Q4_K_M",
+        chatTemplate = "qwen2",
+    ),
+    DownloadableModel(
+        name = "Qwen2.5 3B Instruct Q4_K_M",
+        description = "Best balance of speed and quality for mobile",
+        url = "https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf",
+        sizeBytes = 2_000_000_000L,
+        paramCount = "3B",
+        quantization = "Q4_K_M",
+        chatTemplate = "qwen2",
+    ),
+    DownloadableModel(
+        name = "SmolLM2 1.7B Instruct Q4_K_M",
+        description = "Fast and lightweight for basic tasks",
+        url = "https://huggingface.co/bartowski/SmolLM2-1.7B-Instruct-GGUF/resolve/main/SmolLM2-1.7B-Instruct-Q4_K_M.gguf",
+        sizeBytes = 1_100_000_000L,
+        paramCount = "1.7B",
+        quantization = "Q4_K_M",
+        chatTemplate = "chatml",
+    ),
+    DownloadableModel(
+        name = "Gemma 2 2B Instruct Q4_K_M",
+        description = "Google Gemma 2 — compact and capable",
+        url = "https://huggingface.co/bartowski/gemma-2-2b-it-GGUF/resolve/main/gemma-2-2b-it-Q4_K_M.gguf",
+        sizeBytes = 1_600_000_000L,
+        paramCount = "2B",
+        quantization = "Q4_K_M",
+        chatTemplate = "gemma",
+    ),
+    DownloadableModel(
+        name = "TinyLlama 1.1B Chat Q4_K_M",
+        description = "Smallest, runs on any phone, 638MB",
+        url = "https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf",
+        sizeBytes = 638_000_000L,
+        paramCount = "1.1B",
+        quantization = "Q4_K_M",
+        chatTemplate = "chatml",
+    ),
+    DownloadableModel(
+        name = "DeepSeek R1 1.5B Q4_K_M",
+        description = "Reasoning model for logic and math",
+        url = "https://huggingface.co/bartowski/DeepSeek-R1-Distill-Qwen-1.5B-GGUF/resolve/main/DeepSeek-R1-Distill-Qwen-1.5B-Q4_K_M.gguf",
+        sizeBytes = 1_100_000_000L,
+        paramCount = "1.5B",
+        quantization = "Q4_K_M",
+        chatTemplate = "qwen2",
+    ),
+)

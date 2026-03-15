@@ -1,0 +1,29 @@
+[package]
+name = "bizclaw-knowledge"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Ultra-lightweight Knowledge Base / RAG for BizClaw (file-based)"
+
+[dependencies]
+bizclaw-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+chrono.workspace = true
+rusqlite.workspace = true
+reqwest.workspace = true
+dirs.workspace = true
+pdf_oxide = { workspace = true, optional = true }
+zip = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[features]
+default = ["pdf", "docx"]
+pdf = ["dep:pdf_oxide"]
+docx = ["dep:zip"]
+

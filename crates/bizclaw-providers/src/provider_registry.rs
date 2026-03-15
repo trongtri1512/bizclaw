@@ -1,0 +1,702 @@
+//! Provider registry — maps provider names to endpoint configurations.
+//!
+//! All OpenAI-compatible providers are defined here as static config entries.
+//! The unified `OpenAiCompatibleProvider` uses these configs to connect to any provider.
+
+use bizclaw_core::types::ModelInfo;
+
+/// How to attach auth credentials to requests.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AuthStyle {
+    /// `Authorization: Bearer <key>`
+    Bearer,
+    /// No authentication required (local servers).
+    None,
+}
+
+/// Static model definition for a provider.
+#[derive(Debug, Clone)]
+pub struct ModelDef {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub context_length: u32,
+    pub max_output_tokens: Option<u32>,
+}
+
+impl ModelDef {
+    pub fn to_model_info(&self, provider: &str) -> ModelInfo {
+        ModelInfo {
+            id: self.id.into(),
+            name: self.name.into(),
+            provider: provider.into(),
+            context_length: self.context_length,
+            max_output_tokens: self.max_output_tokens,
+        }
+    }
+}
+
+/// Configuration for a single provider.
+#[derive(Debug, Clone)]
+pub struct ProviderConfig {
+    /// Provider identifier.
+    pub name: &'static str,
+    /// Base URL for the API.
+    pub base_url: &'static str,
+    /// Path for chat completions endpoint (appended to base_url).
+    pub chat_path: &'static str,
+    /// Path for listing models (appended to base_url).
+    pub models_path: &'static str,
+    /// Environment variable names to try for the API key (in order).
+    pub env_keys: &'static [&'static str],
+    /// How to send auth credentials.
+    pub auth_style: AuthStyle,
+    /// Environment variable to override the base URL (e.g., OLLAMA_HOST).
+    pub base_url_env: Option<&'static str>,
+    /// Default models to return from `list_models`.
+    pub default_models: &'static [ModelDef],
+}
+
+// ─── Provider Definitions ────────────────────────────────────────────────────
+
+static OPENAI_MODELS: &[ModelDef] = &[
+    ModelDef {
+        id: "gpt-4o",
+        name: "GPT-4o",
+        context_length: 128000,
+        max_output_tokens: Some(4096),
+    },
+    ModelDef {
+        id: "gpt-4o-mini",
+        name: "GPT-4o Mini",
+        context_length: 128000,
+        max_output_tokens: Some(4096),
+    },
+];
+
+static OPENROUTER_MODELS: &[ModelDef] = &[
+    ModelDef {
+        id: "openai/gpt-4o",
+        name: "GPT-4o (OpenRouter)",
+        context_length: 128000,
+        max_output_tokens: Some(4096),
+    },
+    ModelDef {
+        id: "anthropic/claude-sonnet-4-20250514",
+        name: "Claude Sonnet 4 (OpenRouter)",
+        context_length: 200000,
+        max_output_tokens: Some(8192),
+    },
+    ModelDef {
+        id: "stepfun/step-3.5-flash:free",
+        name: "Step 3.5 Flash Free (StepFun)",
+        context_length: 128000,
+        max_output_tokens: Some(8192),
+    },
+];
+
+static ANTHROPIC_MODELS: &[ModelDef] = &[
+    ModelDef {
+        id: "claude-sonnet-4-20250514",
+        name: "Claude Sonnet 4",
+        context_length: 200000,
+        max_output_tokens: Some(8192),
+    },
+    ModelDef {
+        id: "claude-3-5-haiku-20241022",
+        name: "Claude 3.5 Haiku",
+        context_length: 200000,
+        max_output_tokens: Some(8192),
+    },
+    ModelDef {
+        id: "claude-3-5-sonnet-20241022",
+        name: "Claude 3.5 Sonnet",
+        context_length: 200000,
+        max_output_tokens: Some(8192),
+    },
+];
+
+static DEEPSEEK_MODELS: &[ModelDef] = &[
+    ModelDef {
+        id: "deepseek-chat",
+        name: "DeepSeek Chat",
+        context_length: 128000,
+        max_output_tokens: Some(8192),
+    },
+    ModelDef {
+        id: "deepseek-reasoner",
+        name: "DeepSeek R1",
+        context_length: 64000,
+        max_output_tokens: Some(8192),
+    },
+];
+
+static GEMINI_MODELS: &[ModelDef] = &[
+    ModelDef {
+        id: "gemini-2.5-pro",
+        name: "Gemini 2.5 Pro",
+        context_length: 1048576,
+        max_output_tokens: Some(65536),
+    },
+    ModelDef {
+        id: "gemini-2.5-flash",
+        name: "Gemini 2.5 Flash",
+        context_length: 1048576,
+        max_output_tokens: Some(65536),
+    },
+];
+
+static GROQ_MODELS: &[ModelDef] = &[
+    ModelDef {
+        id: "llama-3.3-70b-versatile",
+        name: "Llama 3.3 70B",
+        context_length: 128000,
+        max_output_tokens: Some(32768),
+    },
+    ModelDef {
+        id: "llama-3.1-8b-instant",
+        name: "Llama 3.1 8B",
+        context_length: 128000,
+        max_output_tokens: Some(8192),
+    },
+    ModelDef {
+        id: "mixtral-8x7b-32768",
+        name: "Mixtral 8x7B",
+        context_length: 32768,
+        max_output_tokens: Some(8192),
+    },
+];
+
+static MISTRAL_MODELS: &[ModelDef] = &[
+    ModelDef {
+        id: "mistral-large-latest",
+        name: "Mistral Large",
+        context_length: 128000,
+        max_output_tokens: Some(8192),
+    },
+    ModelDef {
+        id: "mistral-small-latest",
+        name: "Mistral Small",
+        context_length: 128000,
+        max_output_tokens: Some(8192),
+    },
+];
+
+static MINIMAX_MODELS: &[ModelDef] = &[ModelDef {
+    id: "MiniMax-Text-01",
+    name: "MiniMax Text 01",
+    context_length: 1000000,
+    max_output_tokens: Some(8192),
+}];
+
+static XAI_MODELS: &[ModelDef] = &[
+    ModelDef {
+        id: "grok-3",
+        name: "Grok 3",
+        context_length: 131072,
+        max_output_tokens: Some(16384),
+    },
+    ModelDef {
+        id: "grok-3-mini",
+        name: "Grok 3 Mini",
+        context_length: 131072,
+        max_output_tokens: Some(16384),
+    },
+];
+
+static MODELARK_MODELS: &[ModelDef] = &[
+    ModelDef {
+        id: "seed-2-0-mini-260215",
+        name: "Seed 2.0 Mini (Agentic)",
+        context_length: 128000,
+        max_output_tokens: Some(16384),
+    },
+    ModelDef {
+        id: "seed-1-8-251228",
+        name: "Seed 1.8 (Deep Thinking)",
+        context_length: 128000,
+        max_output_tokens: Some(16384),
+    },
+    ModelDef {
+        id: "deepseek-v3-2-251201",
+        name: "DeepSeek V3 (ModelArk)",
+        context_length: 128000,
+        max_output_tokens: Some(8192),
+    },
+    ModelDef {
+        id: "doubao-1-5-pro-256k-250115",
+        name: "Doubao 1.5 Pro 256K",
+        context_length: 256000,
+        max_output_tokens: Some(16384),
+    },
+    ModelDef {
+        id: "doubao-1-5-pro-32k-250115",
+        name: "Doubao 1.5 Pro 32K",
+        context_length: 32000,
+        max_output_tokens: Some(16384),
+    },
+    ModelDef {
+        id: "glm-4-7-251222",
+        name: "GLM 4.7 (Zhipu)",
+        context_length: 128000,
+        max_output_tokens: Some(8192),
+    },
+];
+
+static OLLAMA_MODELS: &[ModelDef] = &[
+    // ⭐ Recommended: Jan-nano — 4B, DAPO-optimized for tool-calling & search
+    // https://huggingface.co/Menlo/Jan-nano
+    ModelDef {
+        id: "jan-nano",
+        name: "⭐ Jan-nano (4B, Tool-calling Master)",
+        context_length: 32768,
+        max_output_tokens: Some(8192),
+    },
+    ModelDef {
+        id: "qwen3:0.6b",
+        name: "Qwen3 0.6B (Ultra-light, Pi-ready)",
+        context_length: 32768,
+        max_output_tokens: Some(4096),
+    },
+    ModelDef {
+        id: "qwen3",
+        name: "Qwen3 4B (Balanced)",
+        context_length: 32768,
+        max_output_tokens: Some(8192),
+    },
+    ModelDef {
+        id: "qwen3:8b",
+        name: "Qwen3 8B (Powerful)",
+        context_length: 32768,
+        max_output_tokens: Some(8192),
+    },
+    ModelDef {
+        id: "llama3.2",
+        name: "Llama 3.2 3B (Meta)",
+        context_length: 128000,
+        max_output_tokens: Some(4096),
+    },
+    ModelDef {
+        id: "gemma3",
+        name: "Gemma 3 4B (Google)",
+        context_length: 128000,
+        max_output_tokens: Some(8192),
+    },
+    ModelDef {
+        id: "phi4-mini",
+        name: "Phi-4 Mini 3.8B (Microsoft)",
+        context_length: 128000,
+        max_output_tokens: Some(4096),
+    },
+    ModelDef {
+        id: "deepseek-r1:7b",
+        name: "DeepSeek R1 7B (Reasoning)",
+        context_length: 64000,
+        max_output_tokens: Some(8192),
+    },
+];
+
+static LLAMACPP_MODELS: &[ModelDef] = &[ModelDef {
+    id: "local-model",
+    name: "Local llama.cpp Model",
+    context_length: 4096,
+    max_output_tokens: Some(4096),
+}];
+
+static COHERE_MODELS: &[ModelDef] = &[
+    ModelDef {
+        id: "command-r-plus",
+        name: "Command R+ (128K)",
+        context_length: 128000,
+        max_output_tokens: Some(4096),
+    },
+    ModelDef {
+        id: "command-r",
+        name: "Command R",
+        context_length: 128000,
+        max_output_tokens: Some(4096),
+    },
+];
+
+static PERPLEXITY_MODELS: &[ModelDef] = &[
+    ModelDef {
+        id: "sonar-pro",
+        name: "Sonar Pro (Search-augmented)",
+        context_length: 200000,
+        max_output_tokens: Some(8192),
+    },
+    ModelDef {
+        id: "sonar",
+        name: "Sonar (Search-augmented)",
+        context_length: 128000,
+        max_output_tokens: Some(8192),
+    },
+];
+
+static DASHSCOPE_MODELS: &[ModelDef] = &[
+    ModelDef {
+        id: "qwen-max",
+        name: "Qwen Max (Alibaba)",
+        context_length: 32768,
+        max_output_tokens: Some(8192),
+    },
+    ModelDef {
+        id: "qwen-plus",
+        name: "Qwen Plus",
+        context_length: 131072,
+        max_output_tokens: Some(8192),
+    },
+    ModelDef {
+        id: "qwen-turbo",
+        name: "Qwen Turbo (Fast)",
+        context_length: 131072,
+        max_output_tokens: Some(8192),
+    },
+];
+
+// ─── Registry ────────────────────────────────────────────────────────────────
+
+/// All known providers.
+static PROVIDERS: &[ProviderConfig] = &[
+    ProviderConfig {
+        name: "openai",
+        base_url: "https://api.openai.com/v1",
+        chat_path: "/chat/completions",
+        models_path: "/models",
+        env_keys: &["OPENAI_API_KEY"],
+        auth_style: AuthStyle::Bearer,
+        base_url_env: Some("OPENAI_API_BASE"),
+        default_models: OPENAI_MODELS,
+    },
+    ProviderConfig {
+        name: "openrouter",
+        base_url: "https://openrouter.ai/api/v1",
+        chat_path: "/chat/completions",
+        models_path: "/models",
+        env_keys: &["OPENROUTER_API_KEY", "OPENAI_API_KEY"],
+        auth_style: AuthStyle::Bearer,
+        base_url_env: None,
+        default_models: OPENROUTER_MODELS,
+    },
+    ProviderConfig {
+        name: "anthropic",
+        base_url: "https://api.anthropic.com/v1",
+        chat_path: "/chat/completions",
+        models_path: "/models",
+        env_keys: &["ANTHROPIC_API_KEY"],
+        auth_style: AuthStyle::Bearer,
+        base_url_env: None,
+        default_models: ANTHROPIC_MODELS,
+    },
+    ProviderConfig {
+        name: "deepseek",
+        base_url: "https://api.deepseek.com",
+        chat_path: "/chat/completions",
+        models_path: "/models",
+        env_keys: &["DEEPSEEK_API_KEY"],
+        auth_style: AuthStyle::Bearer,
+        base_url_env: None,
+        default_models: DEEPSEEK_MODELS,
+    },
+    ProviderConfig {
+        name: "gemini",
+        base_url: "https://generativelanguage.googleapis.com/v1beta/openai",
+        chat_path: "/chat/completions",
+        models_path: "/models",
+        env_keys: &["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+        auth_style: AuthStyle::Bearer,
+        base_url_env: None,
+        default_models: GEMINI_MODELS,
+    },
+    ProviderConfig {
+        name: "groq",
+        base_url: "https://api.groq.com/openai/v1",
+        chat_path: "/chat/completions",
+        models_path: "/models",
+        env_keys: &["GROQ_API_KEY"],
+        auth_style: AuthStyle::Bearer,
+        base_url_env: None,
+        default_models: GROQ_MODELS,
+    },
+    ProviderConfig {
+        name: "ollama",
+        base_url: "http://localhost:11434/v1",
+        chat_path: "/chat/completions",
+        models_path: "/models",
+        env_keys: &[],
+        auth_style: AuthStyle::None,
+        base_url_env: Some("OLLAMA_HOST"),
+        default_models: OLLAMA_MODELS,
+    },
+    ProviderConfig {
+        name: "llamacpp",
+        base_url: "http://localhost:8080/v1",
+        chat_path: "/chat/completions",
+        models_path: "/models",
+        env_keys: &[],
+        auth_style: AuthStyle::None,
+        base_url_env: Some("LLAMACPP_HOST"),
+        default_models: LLAMACPP_MODELS,
+    },
+    ProviderConfig {
+        name: "cliproxy",
+        base_url: "http://localhost:8888/v1",
+        chat_path: "/chat/completions",
+        models_path: "/models",
+        env_keys: &["CLIPROXY_API_KEY"],
+        auth_style: AuthStyle::Bearer,
+        base_url_env: Some("CLIPROXY_HOST"),
+        default_models: &[ModelDef {
+            id: "default",
+            name: "CLIProxy Model",
+            context_length: 128000,
+            max_output_tokens: Some(4096),
+        }],
+    },
+    ProviderConfig {
+        name: "vllm",
+        base_url: "http://localhost:8000/v1",
+        chat_path: "/chat/completions",
+        models_path: "/models",
+        env_keys: &["VLLM_API_KEY"],
+        auth_style: AuthStyle::None,
+        base_url_env: Some("VLLM_HOST"),
+        default_models: &[ModelDef {
+            id: "default",
+            name: "vLLM Model",
+            context_length: 32768,
+            max_output_tokens: Some(4096),
+        }],
+    },
+    ProviderConfig {
+        name: "together",
+        base_url: "https://api.together.xyz/v1",
+        chat_path: "/chat/completions",
+        models_path: "/models",
+        env_keys: &["TOGETHER_API_KEY"],
+        auth_style: AuthStyle::Bearer,
+        base_url_env: None,
+        default_models: &[ModelDef {
+            id: "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+            name: "Llama 3.3 70B (Together)",
+            context_length: 128000,
+            max_output_tokens: Some(4096),
+        }],
+    },
+    ProviderConfig {
+        name: "mistral",
+        base_url: "https://api.mistral.ai/v1",
+        chat_path: "/chat/completions",
+        models_path: "/models",
+        env_keys: &["MISTRAL_API_KEY"],
+        auth_style: AuthStyle::Bearer,
+        base_url_env: None,
+        default_models: MISTRAL_MODELS,
+    },
+    ProviderConfig {
+        name: "minimax",
+        base_url: "https://api.minimax.chat/v1",
+        chat_path: "/chat/completions",
+        models_path: "/models",
+        env_keys: &["MINIMAX_API_KEY"],
+        auth_style: AuthStyle::Bearer,
+        base_url_env: None,
+        default_models: MINIMAX_MODELS,
+    },
+    ProviderConfig {
+        name: "xai",
+        base_url: "https://api.x.ai/v1",
+        chat_path: "/chat/completions",
+        models_path: "/models",
+        env_keys: &["XAI_API_KEY"],
+        auth_style: AuthStyle::Bearer,
+        base_url_env: None,
+        default_models: XAI_MODELS,
+    },
+    ProviderConfig {
+        name: "modelark",
+        base_url: "https://ark.ap-southeast.bytepluses.com/api/v3",
+        chat_path: "/chat/completions",
+        models_path: "/models",
+        env_keys: &["ARK_API_KEY"],
+        auth_style: AuthStyle::Bearer,
+        base_url_env: Some("ARK_BASE_URL"),
+        default_models: MODELARK_MODELS,
+    },
+    ProviderConfig {
+        name: "cohere",
+        base_url: "https://api.cohere.com/v2",
+        chat_path: "/chat",
+        models_path: "/models",
+        env_keys: &["COHERE_API_KEY", "CO_API_KEY"],
+        auth_style: AuthStyle::Bearer,
+        base_url_env: None,
+        default_models: COHERE_MODELS,
+    },
+    ProviderConfig {
+        name: "perplexity",
+        base_url: "https://api.perplexity.ai",
+        chat_path: "/chat/completions",
+        models_path: "/models",
+        env_keys: &["PERPLEXITY_API_KEY", "PPLX_API_KEY"],
+        auth_style: AuthStyle::Bearer,
+        base_url_env: None,
+        default_models: PERPLEXITY_MODELS,
+    },
+    ProviderConfig {
+        name: "dashscope",
+        base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        chat_path: "/chat/completions",
+        models_path: "/models",
+        env_keys: &["DASHSCOPE_API_KEY", "QWEN_API_KEY"],
+        auth_style: AuthStyle::Bearer,
+        base_url_env: None,
+        default_models: DASHSCOPE_MODELS,
+    },
+];
+
+/// Look up a provider config by name.
+pub fn get_provider_config(name: &str) -> Option<&'static ProviderConfig> {
+    // Also match aliases
+    let lookup = match name {
+        "google" => "gemini",
+        "llama.cpp" => "llamacpp",
+        "cli_proxy" | "cliproxyapi" | "CLIProxy" => "cliproxy",
+        "together_ai" | "togetherai" => "together",
+        "grok" => "xai",
+        "bytedance" | "doubao" | "ark" | "volcengine" => "modelark",
+        "co" | "cohere_ai" => "cohere",
+        "pplx" | "perplexity_ai" => "perplexity",
+        "qwen" | "aliyun" | "alibaba" | "tongyi" => "dashscope",
+        other => other,
+    };
+    PROVIDERS.iter().find(|p| p.name == lookup)
+}
+
+/// List all known provider names.
+pub fn all_provider_names() -> Vec<&'static str> {
+    PROVIDERS.iter().map(|p| p.name).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_all_18_providers_resolvable() {
+        let expected = [
+            "openai",
+            "openrouter",
+            "anthropic",
+            "deepseek",
+            "gemini",
+            "groq",
+            "ollama",
+            "llamacpp",
+            "cliproxy",
+            "vllm",
+            "together",
+            "mistral",
+            "minimax",
+            "xai",
+            "modelark",
+            "cohere",
+            "perplexity",
+            "dashscope",
+        ];
+        for name in &expected {
+            assert!(
+                get_provider_config(name).is_some(),
+                "Provider '{}' not found in registry",
+                name
+            );
+        }
+        assert_eq!(all_provider_names().len(), 18);
+    }
+
+    #[test]
+    fn test_aliases() {
+        let alias_map = [
+            ("google", "gemini"),
+            ("llama.cpp", "llamacpp"),
+            ("grok", "xai"),
+            ("bytedance", "modelark"),
+            ("doubao", "modelark"),
+            ("ark", "modelark"),
+            ("co", "cohere"),
+            ("cohere_ai", "cohere"),
+            ("pplx", "perplexity"),
+            ("perplexity_ai", "perplexity"),
+            ("qwen", "dashscope"),
+            ("alibaba", "dashscope"),
+            ("aliyun", "dashscope"),
+            ("tongyi", "dashscope"),
+        ];
+        for (alias, expected) in &alias_map {
+            let config = get_provider_config(alias);
+            assert!(
+                config.is_some(),
+                "Alias '{}' → '{}' not resolvable",
+                alias,
+                expected
+            );
+            assert_eq!(config.unwrap().name, *expected);
+        }
+    }
+
+    #[test]
+    fn test_cohere_config() {
+        let c = get_provider_config("cohere").unwrap();
+        assert_eq!(c.base_url, "https://api.cohere.com/v2");
+        assert_eq!(c.chat_path, "/chat");
+        assert_eq!(c.auth_style, AuthStyle::Bearer);
+        assert!(!c.default_models.is_empty());
+        assert!(c.env_keys.contains(&"COHERE_API_KEY"));
+    }
+
+    #[test]
+    fn test_perplexity_config() {
+        let c = get_provider_config("perplexity").unwrap();
+        assert_eq!(c.base_url, "https://api.perplexity.ai");
+        assert_eq!(c.chat_path, "/chat/completions");
+        assert!(c.env_keys.contains(&"PERPLEXITY_API_KEY"));
+        assert!(c.default_models.iter().any(|m| m.id == "sonar-pro"));
+    }
+
+    #[test]
+    fn test_dashscope_config() {
+        let c = get_provider_config("dashscope").unwrap();
+        assert!(c.base_url.contains("dashscope.aliyuncs.com"));
+        assert!(c.env_keys.contains(&"DASHSCOPE_API_KEY"));
+        assert!(c.default_models.iter().any(|m| m.id == "qwen-max"));
+        assert_eq!(c.default_models.len(), 3);
+    }
+
+    #[test]
+    fn test_all_providers_have_models() {
+        for p in PROVIDERS.iter() {
+            assert!(
+                !p.default_models.is_empty(),
+                "Provider '{}' has no default models",
+                p.name
+            );
+        }
+    }
+
+    #[test]
+    fn test_all_providers_have_auth_or_none() {
+        for p in PROVIDERS.iter() {
+            match p.auth_style {
+                AuthStyle::Bearer => {
+                    assert!(
+                        !p.env_keys.is_empty() || p.name == "vllm" || p.name == "cliproxy",
+                        "Provider '{}' has Bearer auth but no env_keys",
+                        p.name
+                    );
+                }
+                AuthStyle::None => {
+                    // Local providers (ollama, llamacpp) — OK without keys
+                }
+            }
+        }
+    }
+}
